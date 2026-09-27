@@ -1,0 +1,210 @@
+[Event "Sicilian Defense: Najdorf Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 a6 *
+
+[Event "Sicilian Defense: Dragon Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 g6 *
+
+[Event "Sicilian Defense: Classical Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c5 2.Nf3 d6 3.d4 cxd4 4.Nxd4 Nf6 5.Nc3 Nc6 *
+
+[Event "Sicilian Defense: Taimanov Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c5 2.Nf3 e6 3.d4 cxd4 4.Nxd4 Nc6 5.Nc3 Qc7 *
+
+[Event "Sicilian Defense: Kan Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c5 2.Nf3 e6 3.d4 cxd4 4.Nxd4 a6 *
+
+[Event "French Defense: Classical Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 e6 2.d4 d5 3.Nc3 Nf6 4.Bg5 Be7 5.e5 Nfd7 *
+
+[Event "French Defense: Winawer Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 e6 2.d4 d5 3.Nc3 Bb4 *
+
+[Event "French Defense: Tarrasch Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 e6 2.d4 d5 3.Nd2 Nf6 4.e5 Nfd7 *
+
+[Event "Caro-Kann Defense: Classical Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c6 2.d4 d5 3.Nc3 dxe4 4.Nxe4 Bf5 5.Ng3 Bg6 *
+
+[Event "Caro-Kann Defense: Advance Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 c6 2.d4 d5 3.e5 Bf5 4.Nf3 e6 *
+
+[Event "Scandinavian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 d5 2.exd5 Qxd5 3.Nc3 Qa5 4.d4 Nf6 *
+
+[Event "Pirc Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 d6 2.d4 Nf6 3.Nc3 g6 4.Nf3 Bg7 *
+
+[Event "Modern Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 g6 2.d4 Bg7 3.Nc3 d6 *
+
+[Event "Alekhine's Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 Nf6 2.e5 Nd5 3.d4 d6 4.Nf3 Bg4 *
+
+[Event "Petrov's Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 e5 2.Nf3 Nf6 3.Nxe5 d6 4.Nf3 Nxe4 *
+
+[Event "Philidor Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.e4 e5 2.Nf3 d6 3.d4 Nf6 *
+
+[Event "King's Indian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 g6 3.Nc3 Bg7 4.e4 d6 5.Nf3 O-O *
+
+[Event "Grunfeld Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 g6 3.Nc3 d5 4.cxd5 Nxd5 *
+
+[Event "Nimzo-Indian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 e6 3.Nc3 Bb4 4.Qc2 O-O *
+
+[Event "Queen's Indian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 e6 3.Nf3 b6 4.g3 Bb7 *
+
+[Event "Bogo-Indian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 e6 3.Nf3 Bb4+ 4.Bd2 Qe7 *
+
+[Event "Modern Benoni"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 c5 3.d5 e6 4.Nc3 exd5 5.cxd5 d6 *
+
+[Event "Benko Gambit"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 c5 3.d5 b5 4.cxb5 a6 *
+
+[Event "Dutch Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 f5 2.g3 Nf6 3.Bg2 e6 *
+
+[Event "Slav Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 d5 2.c4 c6 3.Nf3 Nf6 4.Nc3 dxc4 *
+
+[Event "Chigorin Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 d5 2.c4 Nc6 3.Nf3 Bg4 *
+
+[Event "Budapest Gambit"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.d4 Nf6 2.c4 e5 3.dxe5 Ng4 *
+
+[Event "English Opening: Symmetrical Variation"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.c4 c5 2.Nf3 Nf6 3.Nc3 Nc6 *
+
+[Event "English Opening: Reversed Sicilian (Black setup)"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.c4 e5 2.Nc3 Nf6 3.Nf3 Nc6 4.g3 Bb4 *
+
+[Event "English Opening: Anglo-Indian Defense"]
+[White "You"]
+[Black "Opponent"]
+[Result "*"]
+
+1.c4 Nf6 2.Nc3 e6 3.Nf3 Bb4 *
+

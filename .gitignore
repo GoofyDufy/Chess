@@ -1,0 +1,10 @@
+# personal data: your games, puzzles, username, settings
+chessprep.db
+chessprep.db-journal
+
+# engine binary: each user downloads the build for their own CPU/OS
+stockfish/
+
+__pycache__/
+*.pyc
+.vscode/
