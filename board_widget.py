@@ -18,6 +18,7 @@ BOARD_PIXELS = SQUARE_SIZE * 8
 LIGHT = BOARD_LIGHT
 DARK = BOARD_DARK
 HIGHLIGHT = BOARD_HIGHLIGHT
+ANNOTATION_COLOR = "#E0892B"   # orange, reads on both square colors
 
 # Same unicode glyph is used for both colors — we recolor it ourselves
 # below rather than relying on the font's built-in hollow/solid styling,
@@ -35,8 +36,8 @@ class ChessBoardWidget(tk.Canvas):
     it on the board (via load_fen / push_move) or reset the selection."""
 
     def __init__(self, master, on_move_attempt, **kwargs):
-        kwargs.setdefault("highlightthickness", 1)
-        kwargs.setdefault("highlightbackground", "#D9DCE3")
+        kwargs.setdefault("highlightthickness", 0)
+        kwargs.setdefault("highlightbackground", "#262A32")
         kwargs.setdefault("bg", PANEL_BG)
         super().__init__(master, width=BOARD_PIXELS, height=BOARD_PIXELS, **kwargs)
         self.on_move_attempt = on_move_attempt
@@ -45,12 +46,23 @@ class ChessBoardWidget(tk.Canvas):
         self.legal_targets: set[int] = set()
         # True = Black at the bottom (you're playing Black)
         self.flipped: bool = False
+        # chess.com-style annotations: right-drag = arrow, right-click a
+        # square = circle, any left click clears them
+        self.arrows: set[tuple[int, int]] = set()
+        self.circles: set[int] = set()
+        self._right_press_square: Optional[int] = None
         self.bind("<Button-1>", self._handle_click)
+        # Button-3 is right-click on Windows/Linux; Button-2 on macOS
+        for button in ("3", "2"):
+            self.bind(f"<ButtonPress-{button}>", self._on_right_press)
+            self.bind(f"<ButtonRelease-{button}>", self._on_right_release)
 
     def load_fen(self, fen: str, flipped: Optional[bool] = None) -> None:
         self.board = chess.Board(fen)
         if flipped is not None:
             self.flipped = flipped
+        self.arrows.clear()
+        self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
         self.redraw()
@@ -62,6 +74,8 @@ class ChessBoardWidget(tk.Canvas):
         self.board = board
         if flipped is not None:
             self.flipped = flipped
+        self.arrows.clear()
+        self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
         self.redraw()
@@ -70,6 +84,8 @@ class ChessBoardWidget(tk.Canvas):
         self.board = None
         self.selected_square = None
         self.legal_targets = set()
+        self.arrows.clear()
+        self.circles.clear()
         self.delete("all")
 
     def _square_at(self, col: int, row: int) -> int:
@@ -77,6 +93,45 @@ class ChessBoardWidget(tk.Canvas):
         if self.flipped:
             return chess.square(7 - col, row)
         return chess.square(col, 7 - row)
+
+    def _square_center(self, square: int) -> tuple[float, float]:
+        """Inverse of _square_at: pixel center of a square on screen."""
+        file, rank = chess.square_file(square), chess.square_rank(square)
+        col, row = (7 - file, rank) if self.flipped else (file, 7 - rank)
+        return col * SQUARE_SIZE + SQUARE_SIZE / 2, row * SQUARE_SIZE + SQUARE_SIZE / 2
+
+    def _event_square(self, event) -> Optional[int]:
+        col, row = event.x // SQUARE_SIZE, event.y // SQUARE_SIZE
+        if not (0 <= col <= 7 and 0 <= row <= 7):
+            return None
+        return self._square_at(col, row)
+
+    # ---------- annotations (arrows / circles) ----------
+
+    def _on_right_press(self, event) -> None:
+        self._right_press_square = self._event_square(event) if self.board else None
+
+    def _on_right_release(self, event) -> None:
+        start, end = self._right_press_square, self._event_square(event)
+        self._right_press_square = None
+        if start is None or end is None:
+            return
+        if start == end:
+            self.circles ^= {start}          # right-click again removes it
+        else:
+            self.arrows ^= {(start, end)}    # same arrow again removes it
+        self.redraw()
+
+    def _draw_annotations(self) -> None:
+        r = SQUARE_SIZE / 2 - 3
+        for square in self.circles:
+            cx, cy = self._square_center(square)
+            self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ANNOTATION_COLOR, width=4)
+        for start, end in self.arrows:
+            x0, y0 = self._square_center(start)
+            x1, y1 = self._square_center(end)
+            self.create_line(x0, y0, x1, y1, fill=ANNOTATION_COLOR, width=11,
+                             arrow="last", arrowshape=(22, 26, 10), capstyle="round")
 
     def redraw(self) -> None:
         self.delete("all")
@@ -149,20 +204,26 @@ class ChessBoardWidget(tk.Canvas):
                             fill="#8A8F98", outline="",
                         )
 
+        self._draw_annotations()
+
     def _flash_illegal(self) -> None:
         """Brief red flash on the whole board so an invalid click is
         obviously acknowledged instead of silently doing nothing."""
         self.configure(highlightbackground="#C0392B", highlightthickness=2)
-        self.after(150, lambda: self.configure(highlightbackground="#D9DCE3", highlightthickness=1))
+        self.after(150, lambda: self.configure(highlightthickness=0))
 
     def _handle_click(self, event) -> None:
         if self.board is None:
             return
-        col = event.x // SQUARE_SIZE
-        row = event.y // SQUARE_SIZE
-        if not (0 <= col <= 7 and 0 <= row <= 7):
+        if self.arrows or self.circles:
+            # like chess.com: a left click wipes your drawings, then the
+            # click still works as a normal select/move click
+            self.arrows.clear()
+            self.circles.clear()
+            self.redraw()
+        square = self._event_square(event)
+        if square is None:
             return
-        square = self._square_at(col, row)
 
         if self.selected_square is None:
             piece = self.board.piece_at(square)

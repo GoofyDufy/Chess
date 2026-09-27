@@ -10,7 +10,9 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog
+
+import customtkinter as ctk
 from typing import List, Optional
 
 import chess
@@ -25,9 +27,9 @@ from models import TIME_FILTERS, Game, Puzzle
 
 TYPE_COLORS = {
     "Missed Mate": theme.ERROR,
-    "Hanging Piece": "#B8860B",
+    "Hanging Piece": theme.WARNING,
     "Blunder": theme.ERROR,
-    "Mistake": "#B8860B",
+    "Mistake": theme.INFO,
     "Inaccuracy": theme.TEXT_MUTED,
 }
 
@@ -62,9 +64,9 @@ def _swing_text(p: Puzzle) -> str:
     return f"−{p.eval_swing_cp / 100:.1f}"
 
 
-class PuzzleReviewTab(ttk.Frame):
+class PuzzleReviewTab(ctk.CTkFrame):
     def __init__(self, master, conn):
-        super().__init__(master)
+        super().__init__(master, fg_color="transparent")
         self.conn = conn
         self.queue: List[Puzzle] = []
         self.queue_index: int = -1
@@ -105,155 +107,127 @@ class PuzzleReviewTab(ttk.Frame):
     # ---------- Layout ----------
 
     def _build_layout(self) -> None:
-        left = theme.panel(self)
-        left.master.pack(side="left", padx=(20, 10), pady=14, anchor="n")
-        board_pad = ttk.Frame(left, style="Panel.TFrame", padding=16)
-        board_pad.pack()
+        left = theme.card(self)
+        left.pack(side="left", padx=(24, 12), pady=24, anchor="n")
+        board_pad = ctk.CTkFrame(left, fg_color="transparent")
+        board_pad.pack(padx=18, pady=16)
 
-        self.game_label = ttk.Label(board_pad, text="", style="PanelMuted.TLabel")
+        self.game_label = theme.label(board_pad, "", "muted")
         self.game_label.pack(anchor="w", pady=(0, 8))
 
-        self.board_widget = ChessBoardWidget(board_pad, self._on_move_attempt)
+        self.board_widget = ChessBoardWidget(board_pad, self._on_move_attempt, bg=theme.PANEL_BG)
         self.board_widget.pack()
 
-        self.status_label = ttk.Label(
-            board_pad, text="", style="PanelStatus.TLabel", wraplength=BOARD_PIXELS,
-            justify="left",
-        )
+        self.status_label = theme.label(board_pad, "", "status", wraplength=BOARD_PIXELS)
         self.status_label.pack(pady=(12, 0), anchor="w")
+        self.explanation_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
+        self.explanation_label.pack(pady=(2, 0), anchor="w")
 
-        self.explanation_label = ttk.Label(
-            board_pad, text="", style="Panel.TLabel", wraplength=BOARD_PIXELS, justify="left",
-        )
-        self.explanation_label.pack(pady=(6, 0), anchor="w")
-
-        button_row = ttk.Frame(board_pad, style="Panel.TFrame")
-        button_row.pack(pady=(10, 0), fill="x")
-        self.prev_button = ttk.Button(button_row, text="← Previous", style="Secondary.TButton",
-                                      command=self._go_previous)
+        button_row = ctk.CTkFrame(board_pad, fg_color="transparent")
+        button_row.pack(pady=(12, 0), fill="x")
+        self.prev_button = theme.button(button_row, "← Previous", self._go_previous, width=112)
         self.prev_button.pack(side="left")
-        self.retry_button = ttk.Button(button_row, text="Try again", style="Secondary.TButton",
-                                       command=self._on_retry)
-        self.reveal_button = ttk.Button(button_row, text="Show answer", style="Secondary.TButton",
-                                        command=self._on_reveal)
+        self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
+        self.reveal_button = theme.button(button_row, "Show answer", self._on_reveal, width=120)
         # retry/reveal are packed only after a wrong attempt
-        self.next_button = ttk.Button(button_row, text="Next puzzle →", style="Accent.TButton",
-                                      command=self._go_next)
+        self.next_button = theme.button(button_row, "Next puzzle →", self._go_next, "primary", width=140)
         self.next_button.pack(side="right")
 
-        right = ttk.Frame(self, padding=(10, 14, 20, 14))
-        right.pack(side="left", fill="both", expand=True)
+        right = ctk.CTkFrame(self, fg_color="transparent")
+        right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
 
-        # ---- Games ----
-        heading_row = ttk.Frame(right)
+        # ---- Games card ----
+        games_card = theme.card(right)
+        games_card.pack(fill="x")
+        games = ctk.CTkFrame(games_card, fg_color="transparent")
+        games.pack(fill="x", padx=18, pady=16)
+
+        heading_row = ctk.CTkFrame(games, fg_color="transparent")
         heading_row.pack(fill="x")
-        ttk.Label(heading_row, text="Your games", style="Heading.TLabel").pack(side="left")
+        theme.label(heading_row, "Your games", "heading").pack(side="left")
         self.focus_var = tk.StringVar(value=db.get_setting(self.conn, "focus_filter") or "All games")
         if self.focus_var.get() not in TIME_FILTERS:
             self.focus_var.set("All games")
-        focus_dropdown = ttk.Combobox(heading_row, textvariable=self.focus_var,
-                                      values=list(TIME_FILTERS), state="readonly", width=16)
-        focus_dropdown.pack(side="right")
-        focus_dropdown.bind("<<ComboboxSelected>>", lambda e: self._on_focus_changed())
-        ttk.Label(heading_row, text="Focus", style="TLabel").pack(side="right", padx=(0, 6))
+        theme.option_menu(heading_row, list(TIME_FILTERS), self.focus_var,
+                          lambda _: self._on_focus_changed(), width=150).pack(side="right")
+        theme.label(heading_row, "Focus", "muted").pack(side="right", padx=(0, 8))
 
-        self.games_summary_label = ttk.Label(right, text="", style="Muted.TLabel",
-                                             wraplength=300, justify="left")
-        self.games_summary_label.pack(anchor="w", pady=(2, 8))
+        self.games_summary_label = theme.label(games, "", "muted", wraplength=340)
+        self.games_summary_label.pack(anchor="w", fill="x", pady=(6, 10))
 
-        self.import_button = ttk.Button(right, text="Import games from chess.com",
-                                        style="Secondary.TButton", command=self._import_games)
-        self.import_button.pack(fill="x", pady=(0, 4))
-
-        months_row = ttk.Frame(right)
-        months_row.pack(fill="x")
-        ttk.Label(months_row, text="Import last", style="TLabel").pack(side="left")
+        self.import_button = theme.button(games, "Import games from chess.com", self._import_games)
+        self.import_button.pack(fill="x")
+        months_row = ctk.CTkFrame(games, fg_color="transparent")
+        months_row.pack(fill="x", pady=(6, 0))
+        theme.label(months_row, "Import last", "muted").pack(side="left")
         self.import_months_var = tk.StringVar(
             value=db.get_setting(self.conn, "import_months") or DEFAULT_IMPORT_MONTHS
         )
-        ttk.Spinbox(months_row, from_=0, to=240, increment=1,
-                    textvariable=self.import_months_var, width=5).pack(side="left", padx=(8, 4))
-        ttk.Label(months_row, text="months (0 = all history)",
-                  style="Muted.TLabel").pack(side="left")
+        theme.entry(months_row, self.import_months_var, width=52).pack(side="left", padx=8)
+        theme.label(months_row, "months (0 = all history)", "muted").pack(side="left")
 
-        # ---- Analysis settings ----
-        ttk.Label(right, text="Find mistakes", style="Section.TLabel").pack(anchor="w", pady=(14, 4))
-
-        settings = ttk.Frame(right)
+        theme.label(games, "FIND MISTAKES", "section").pack(anchor="w", pady=(16, 6))
+        settings = ctk.CTkFrame(games, fg_color="transparent")
         settings.pack(fill="x")
-        settings.columnconfigure(1, weight=1)
-
-        ttk.Label(settings, text="Blunder size", style="TLabel").grid(row=0, column=0, sticky="w", pady=2)
         self.threshold_var = tk.StringVar(
             value=db.get_setting(self.conn, "threshold_pawns") or DEFAULT_THRESHOLD_PAWNS
         )
-        ttk.Spinbox(
-            settings, from_=0.2, to=10.0, increment=0.1,
-            textvariable=self.threshold_var, width=6, format="%.1f",
-        ).grid(row=0, column=1, sticky="w", padx=(8, 4))
-        ttk.Label(settings, text="pawns lost", style="Muted.TLabel").grid(row=0, column=2, sticky="w")
-
-        ttk.Label(settings, text="Games per run", style="TLabel").grid(row=1, column=0, sticky="w", pady=2)
         self.games_per_run_var = tk.StringVar(
             value=db.get_setting(self.conn, "games_per_run") or DEFAULT_GAMES_PER_RUN
         )
-        ttk.Spinbox(
-            settings, from_=1, to=1000, increment=10,
-            textvariable=self.games_per_run_var, width=6,
-        ).grid(row=1, column=1, sticky="w", padx=(8, 4))
-        ttk.Label(settings, text="newest first", style="Muted.TLabel").grid(row=1, column=2, sticky="w")
+        for row, (text, var, hint) in enumerate((
+            ("Blunder size", self.threshold_var, "pawns lost"),
+            ("Games per run", self.games_per_run_var, "newest first"),
+        )):
+            theme.label(settings, text).grid(row=row, column=0, sticky="w", pady=3)
+            theme.entry(settings, var, width=64).grid(row=row, column=1, sticky="w", padx=10, pady=3)
+            theme.label(settings, hint, "muted").grid(row=row, column=2, sticky="w", pady=3)
 
-        self.analyze_button = ttk.Button(right, text="Analyze new games", style="Accent.TButton",
-                                         command=self._analyze_games)
-        self.analyze_button.pack(fill="x", pady=(10, 4))
+        self.analyze_button = theme.button(games, "Analyze new games", self._analyze_games, "primary")
+        self.analyze_button.pack(fill="x", pady=(12, 6))
 
-        self.stop_button = ttk.Button(right, text="Stop (keeps finished games)",
-                                      style="Secondary.TButton", command=self._on_stop)
-        self.progress_bar = ttk.Progressbar(right, mode="determinate")
-        self.progress_label = ttk.Label(right, text="", style="Muted.TLabel")
+        self.stop_button = theme.button(games, "Stop (keeps finished games)", self._on_stop)
+        self.progress_bar = theme.progress_bar(games)
+        self.progress_label = theme.label(games, "", "muted")
+        self._progress_max: Optional[int] = None
         # stop/progress are shown only while work is running
-        self._progress_anchor = ttk.Frame(right, height=0)
+        self._progress_anchor = ctk.CTkFrame(games, height=0, fg_color="transparent")
         self._progress_anchor.pack(fill="x")
 
-        self.regenerate_button = ttk.Button(right, text="Apply blunder size (instant)",
-                                            style="Secondary.TButton", command=self._regenerate_puzzles)
-        self.regenerate_button.pack(fill="x", pady=4)
-        ttk.Label(
-            right, text="Stockfish results are saved, so games are never analyzed twice. "
-                        "Changing the blunder size just re-filters them.",
-            style="Muted.TLabel", wraplength=300, justify="left",
-        ).pack(anchor="w", pady=(2, 0))
+        self.regenerate_button = theme.button(games, "Apply blunder size (instant)", self._regenerate_puzzles)
+        self.regenerate_button.pack(fill="x")
+        theme.label(
+            games, "Stockfish results are saved, so games are never analyzed twice.",
+            "muted", wraplength=340,
+        ).pack(anchor="w", pady=(6, 0))
 
-        # ---- Puzzle queue ----
-        ttk.Label(right, text="Puzzle queue", style="Heading.TLabel").pack(anchor="w", pady=(18, 6))
+        # ---- Puzzle queue card ----
+        queue_card = theme.card(right)
+        queue_card.pack(fill="both", expand=True, pady=(16, 0))
+        queue_box = ctk.CTkFrame(queue_card, fg_color="transparent")
+        queue_box.pack(fill="both", expand=True, padx=18, pady=16)
 
-        filter_row = ttk.Frame(right)
-        filter_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(filter_row, text="Show", style="TLabel").pack(side="left")
+        queue_heading = ctk.CTkFrame(queue_box, fg_color="transparent")
+        queue_heading.pack(fill="x", pady=(0, 8))
+        theme.label(queue_heading, "Puzzle queue", "heading").pack(side="left")
         self.type_filter_var = tk.StringVar(value="All types")
-        self.type_filter_dropdown = ttk.Combobox(
-            filter_row, textvariable=self.type_filter_var, state="readonly", width=20,
+        self.type_filter_dropdown = theme.option_menu(
+            queue_heading, ["All types"], self.type_filter_var, lambda _: self._reload_queue(), width=150,
         )
-        self.type_filter_dropdown.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        self.type_filter_dropdown.bind("<<ComboboxSelected>>", lambda e: self._reload_queue())
+        self.type_filter_dropdown.pack(side="right")
 
         # packed before the list (at the bottom) so it's never clipped
-        self.queue_count_label = ttk.Label(right, text="", style="Muted.TLabel")
-        self.queue_count_label.pack(side="bottom", anchor="w", pady=(6, 0))
+        self.queue_count_label = theme.label(queue_box, "", "muted")
+        self.queue_count_label.pack(side="bottom", anchor="w", pady=(8, 0))
 
-        list_frame = ttk.Frame(right)
+        list_frame = ctk.CTkFrame(queue_box, fg_color=theme.PANEL_ALT, corner_radius=10)
         list_frame.pack(fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
-        self.queue_listbox = tk.Listbox(
-            list_frame, height=6, width=34, activestyle="none",
-            font=theme.FONT_BASE, yscrollcommand=scrollbar.set,
-            selectbackground=theme.ACCENT, selectforeground=theme.ACCENT_TEXT,
-            relief="flat", borderwidth=0, highlightthickness=1,
-            highlightbackground=theme.BORDER, exportselection=False,
-        )
-        scrollbar.config(command=self.queue_listbox.yview)
-        self.queue_listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="left", fill="y")
+        self.queue_listbox = theme.listbox(list_frame, height=5, width=30)
+        scrollbar = ctk.CTkScrollbar(list_frame, command=self.queue_listbox.yview,
+                                     button_color=theme.CONTROL_BG, fg_color=theme.PANEL_ALT)
+        self.queue_listbox.configure(yscrollcommand=scrollbar.set)
+        self.queue_listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scrollbar.pack(side="left", fill="y", pady=8)
         self.queue_listbox.bind("<<ListboxSelect>>", self._on_queue_select)
 
     def _focus_classes(self) -> Optional[set]:
@@ -278,7 +252,7 @@ class PuzzleReviewTab(ttk.Frame):
                 text += (f"\n{s['legacy']} were analyzed in an older format and need a one-time "
                          "re-analysis for full data (top 3 engine moves). They keep their puzzles; "
                          "Analyze new games handles them after new games.")
-        self.games_summary_label.config(text=text)
+        self.games_summary_label.configure(text=text)
 
     # ---------- Queue management ----------
 
@@ -287,7 +261,7 @@ class PuzzleReviewTab(ttk.Frame):
         games or changing the type filter. Randomly ordered, no due-date
         gating: every generated puzzle is browsable."""
         types = db.distinct_puzzle_types(self.conn)
-        self.type_filter_dropdown["values"] = ["All types"] + types
+        self.type_filter_dropdown.configure(values=["All types"] + types)
         if self.type_filter_var.get() not in ["All types"] + types:
             self.type_filter_var.set("All types")
 
@@ -304,12 +278,12 @@ class PuzzleReviewTab(ttk.Frame):
             self.current_puzzle = None
             self.current_game = None
             self.board_widget.clear()
-            self.game_label.config(text="")
-            self.status_label.config(
+            self.game_label.configure(text="")
+            self.status_label.configure(
                 text="No puzzles yet. Import your games, then click Analyze new games.",
-                foreground=theme.TEXT_MUTED,
+                text_color=theme.TEXT_MUTED,
             )
-            self.explanation_label.config(text="")
+            self.explanation_label.configure(text="")
             self._hide_retry_buttons()
 
     def _listbox_label(self, index: int) -> str:
@@ -329,7 +303,7 @@ class PuzzleReviewTab(ttk.Frame):
         text = f"{len(self.queue)} puzzle(s)"
         if solved:
             text += f" · {solved} solved this session"
-        self.queue_count_label.config(text=text)
+        self.queue_count_label.configure(text=text)
 
     def _refresh_listbox_row(self, index: int) -> None:
         self.queue_listbox.delete(index)
@@ -365,7 +339,7 @@ class PuzzleReviewTab(ttk.Frame):
     def _load_puzzle_at(self, index: int) -> None:
         self.attempt_state = "solving"
         self._hide_retry_buttons()
-        self.explanation_label.config(text="")
+        self.explanation_label.configure(text="")
         self.queue_index = index
         self.current_puzzle = self.queue[index]
         self.current_game = (
@@ -375,7 +349,7 @@ class PuzzleReviewTab(ttk.Frame):
         board = chess.Board(self.current_puzzle.fen)
         # puzzle positions are always your move — show the board from your side
         self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
-        self.game_label.config(text=self._game_label_text())
+        self.game_label.configure(text=self._game_label_text())
         self._show_prompt()
 
         self.queue_listbox.selection_clear(0, tk.END)
@@ -384,7 +358,7 @@ class PuzzleReviewTab(ttk.Frame):
 
     def _show_prompt(self) -> None:
         side = "White" if chess.Board(self.current_puzzle.fen).turn == chess.WHITE else "Black"
-        self.status_label.config(text=f"Find the best move for {side}.", foreground=theme.TEXT)
+        self.status_label.configure(text=f"Find the best move for {side}.", text_color=theme.TEXT)
 
     def _game_label_text(self) -> str:
         if self.current_game is None:
@@ -415,13 +389,13 @@ class PuzzleReviewTab(ttk.Frame):
             self.attempt_state = "done"
             self.solved_ids.add(self.current_puzzle.id)
             self._refresh_listbox_row(self.queue_index)
-            self.status_label.config(text=f"Correct — {played_san}!", foreground=theme.SUCCESS)
-            self.explanation_label.config(text=self._explanation_text(correct=True))
+            self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
+            self.explanation_label.configure(text=self._explanation_text(correct=True))
         else:
             self.attempt_state = "wrong"
-            self.status_label.config(
+            self.status_label.configure(
                 text=f"Not quite — {played_san} isn't the best move here.",
-                foreground=theme.ERROR,
+                text_color=theme.ERROR,
             )
             self._show_retry_buttons()
 
@@ -441,10 +415,10 @@ class PuzzleReviewTab(ttk.Frame):
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
         self.board_widget.redraw()
-        self.status_label.config(
-            text=f"The best move was {self.current_puzzle.correct_move_san}.", foreground=theme.TEXT,
+        self.status_label.configure(
+            text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
         )
-        self.explanation_label.config(text=self._explanation_text(correct=False))
+        self.explanation_label.configure(text=self._explanation_text(correct=False))
 
     def _show_retry_buttons(self) -> None:
         self.retry_button.pack(side="left", padx=(8, 0))
@@ -483,25 +457,28 @@ class PuzzleReviewTab(ttk.Frame):
         self._busy = busy
         state = "disabled" if busy else "normal"
         for button in (self.import_button, self.analyze_button, self.regenerate_button):
-            button.config(state=state)
+            button.configure(state=state)
 
     def _show_progress(self, text: str, maximum: Optional[int] = None, stoppable: bool = False) -> None:
+        self._progress_max = maximum
         if maximum is None:
-            self.progress_bar.config(mode="indeterminate")
-            self.progress_bar.start(12)
+            self.progress_bar.configure(mode="indeterminate")
+            self.progress_bar.start()
         else:
             self.progress_bar.stop()
-            self.progress_bar.config(mode="determinate", maximum=max(maximum, 1), value=0)
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(0)
         if stoppable:
-            self.stop_button.config(state="normal")
-            self.stop_button.pack(after=self._progress_anchor, fill="x", pady=(0, 4))
-        self.progress_bar.pack(after=self._progress_anchor, fill="x", pady=(2, 2))
-        self.progress_label.pack(after=self.progress_bar, anchor="w", pady=(0, 4))
-        self.progress_label.config(text=text)
+            self.stop_button.configure(state="normal")
+            self.stop_button.pack(after=self._progress_anchor, fill="x", pady=(0, 6))
+        self.progress_bar.pack(after=self._progress_anchor, fill="x", pady=(4, 4))
+        self.progress_label.pack(after=self.progress_bar, anchor="w", pady=(0, 6))
+        self.progress_label.configure(text=text)
 
     def _update_progress(self, value: int, text: str) -> None:
-        self.progress_bar["value"] = value
-        self.progress_label.config(text=text)
+        if self._progress_max:
+            self.progress_bar.set(value / self._progress_max)
+        self.progress_label.configure(text=text)
 
     def _hide_progress(self) -> None:
         self.progress_bar.stop()
@@ -538,7 +515,7 @@ class PuzzleReviewTab(ttk.Frame):
 
         def on_progress(done: int, total: int):
             text = f"Downloading month {done} of {total}..."
-            self._ui_queue.put(lambda: self.progress_label.config(text=text))
+            self._ui_queue.put(lambda: self.progress_label.configure(text=text))
 
         def worker():
             try:
@@ -690,8 +667,8 @@ class PuzzleReviewTab(ttk.Frame):
 
     def _on_stop(self) -> None:
         self._stop_event.set()
-        self.stop_button.config(state="disabled")
-        self.progress_label.config(text="Stopping after the current move...")
+        self.stop_button.configure(state="disabled")
+        self.progress_label.configure(text="Stopping after the current move...")
 
     def _regenerate_puzzles(self) -> None:
         """Re-filters every cached evaluation at the current blunder size.

@@ -1,2 +1,3 @@
 python-chess>=1.10
-requests>=2.31
+requests
+customtkinter>=5.2>=2.31

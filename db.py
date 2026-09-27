@@ -463,6 +463,24 @@ def _row_to_opening_line(r: sqlite3.Row) -> OpeningLine:
     )
 
 
+def find_line_node(conn: sqlite3.Connection, repertoire_name: str, my_color: str,
+                   line_name: str, parent_id: Optional[str], move_uci: str) -> Optional[OpeningLine]:
+    """The existing node for this move in this line, if the line was
+    imported before — lets a re-import update notes instead of duplicating."""
+    row = conn.execute(
+        """SELECT * FROM opening_lines
+           WHERE repertoire_name = ? AND my_color = ? AND line_name IS ?
+           AND parent_id IS ? AND move_uci = ?""",
+        (repertoire_name, my_color, line_name, parent_id, move_uci),
+    ).fetchone()
+    return _row_to_opening_line(row) if row else None
+
+
+def set_line_notes(conn: sqlite3.Connection, node_id: str, notes: Optional[str]) -> None:
+    conn.execute("UPDATE opening_lines SET notes = ? WHERE id = ?", (notes, node_id))
+    conn.commit()
+
+
 def list_repertoires(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
     """Returns distinct (repertoire_name, my_color) pairs available to drill."""
     rows = conn.execute(

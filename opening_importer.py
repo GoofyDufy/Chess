@@ -28,6 +28,18 @@ def _walk(node: chess.pgn.GameNode, parent_id: str | None,
           conn: sqlite3.Connection) -> None:
     for variation in node.variations:
         move = variation.move
+        comment = variation.comment.strip() or None   # PGN {…} after the move = its explanation
+
+        # re-importing a line that's already there (same line, same moves)
+        # updates its notes instead of creating a duplicate tree
+        existing = db.find_line_node(conn, repertoire_name, my_color.value, line_name,
+                                     parent_id, move.uci())
+        if existing is not None:
+            if comment and comment != existing.notes:
+                db.set_line_notes(conn, existing.id, comment)
+            _walk(variation, existing.id, repertoire_name, my_color, line_name, conn)
+            continue
+
         board_before = node.board()
         san = board_before.san(move)
 
@@ -46,6 +58,7 @@ def _walk(node: chess.pgn.GameNode, parent_id: str | None,
             is_line_end=(len(variation.variations) == 0),
             line_name=line_name,
             fen_before_move=board_before.fen(),
+            notes=comment,
         )
         db.save_opening_line(conn, line)
 
@@ -56,7 +69,9 @@ def _walk(node: chess.pgn.GameNode, parent_id: str | None,
 def import_pgn_text(pgn_text: str, repertoire_name: str,
                      my_color: PlayerColor, conn: sqlite3.Connection) -> int:
     """Parses all games in pgn_text and inserts them as trees.
-    Returns the number of positions (nodes) imported. Each game's PGN
+    Returns the number of NEW positions imported (lines already present
+    only get their move comments refreshed, so re-importing an annotated
+    file is safe and returns 0). Each game's PGN
     [Event] header (if present) is stored as that line's display name —
     e.g. "Queens Gambit - Orthodox Defense" — falling back to the
     repertoire name if no Event header is set."""

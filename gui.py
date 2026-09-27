@@ -1,22 +1,22 @@
 """
-Desktop GUI for the chess prep app. Two tabs:
+Desktop GUI for the chess prep app. Three screens, picked from a sidebar:
 
   1. Puzzle Review — import your chess.com games, analyze them with
      Stockfish (results cached per game), and drill the mistakes it finds.
   2. Opening Drill — import a PGN repertoire and get tested on it, with
      the computer randomly playing the opponent's side and correcting
      you when you deviate from your prep.
+  3. Stats — weaknesses, playing style, and openings that fit it.
 
 Run: python gui.py
 Requires: pip install -r requirements.txt
-Requires: a local Stockfish binary for tab 1 (auto-detected, see
+Requires: a local Stockfish binary for analysis (auto-detected, see
 engine_locator.py, or set STOCKFISH_PATH manually)
 """
 
 from __future__ import annotations
 
-import tkinter as tk
-from tkinter import ttk
+import customtkinter as ctk
 
 import db
 import theme
@@ -25,44 +25,72 @@ from drill_tab import OpeningDrillTab
 from puzzle_tab import PuzzleReviewTab
 from stats_tab import StatsTab
 
+SIDEBAR_WIDTH = 200
 
-class App(tk.Tk):
+
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Chess Prep")
-        # tall enough for the board card (board + status/explanation +
-        # buttons) without clipping, but never taller than the screen
-        width = BOARD_PIXELS + 440
-        # (screen height minus room for the taskbar and title bar)
-        height = min(BOARD_PIXELS + 400, self.winfo_screenheight() - 110)
-        self.geometry(f"{width}x{height}+40+10")
-        self.minsize(BOARD_PIXELS + 360, min(BOARD_PIXELS + 200, height))
-
         theme.apply_theme(self)
+
+        # tall enough for the board card (board + status + buttons) without
+        # clipping, but never taller than the screen (minus taskbar/title bar)
+        width = SIDEBAR_WIDTH + BOARD_PIXELS + 520
+        height = min(BOARD_PIXELS + 300, self.winfo_screenheight() - 110)
+        self.geometry(f"{width}x{height}+30+10")
+        self.minsize(SIDEBAR_WIDTH + BOARD_PIXELS + 440, min(BOARD_PIXELS + 200, height))
 
         self.conn = db.get_connection()
 
-        header = ttk.Frame(self, padding=(20, 16, 20, 4))
-        header.pack(fill="x")
-        ttk.Label(header, text="Chess Prep", style="Heading.TLabel").pack(anchor="w")
-        ttk.Label(
-            header, text="Review your mistakes. Drill your openings.",
-            style="Muted.TLabel",
-        ).pack(anchor="w")
+        sidebar = ctk.CTkFrame(self, width=SIDEBAR_WIDTH, corner_radius=0, fg_color=theme.SIDEBAR_BG)
+        sidebar.pack(side="left", fill="y")
+        sidebar.pack_propagate(False)
+        ctk.CTkFrame(self, width=1, corner_radius=0, fg_color=theme.BORDER).pack(side="left", fill="y")
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=16, pady=(6, 12))
+        brand = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand.pack(fill="x", padx=18, pady=(24, 22))
+        ctk.CTkLabel(brand, text="♞", width=34, height=34, corner_radius=10,
+                     fg_color=theme.ACCENT, text_color=theme.ACCENT_TEXT,
+                     font=(theme.FONT_FAMILY, 20)).pack(side="left")
+        theme.label(brand, "Chess Prep", "heading").pack(side="left", padx=(10, 0))
 
-        puzzle_tab = PuzzleReviewTab(notebook, self.conn)
-        drill_tab = OpeningDrillTab(notebook, self.conn)
+        content = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        content.pack(side="left", fill="both", expand=True)
 
-        notebook.add(puzzle_tab, text="Puzzle Review")
-        notebook.add(drill_tab, text="Opening Drill")
+        self.pages = {}
+        self.nav_buttons = {}
+        puzzle_tab = PuzzleReviewTab(content, self.conn)
+        drill_tab = OpeningDrillTab(content, self.conn)
+
         def drill_opening(opening):
-            notebook.select(drill_tab)
+            self.show_page("Opening Drill")
             drill_tab.drill_suggestion(opening.name, opening.color, opening.moves)
 
-        notebook.add(StatsTab(notebook, self.conn, on_drill=drill_opening), text="Stats")
+        stats_tab = StatsTab(content, self.conn, on_drill=drill_opening,
+                             on_repertoire_changed=drill_tab._refresh_repertoire_list)
+
+        for name, page in (("Puzzle Review", puzzle_tab), ("Opening Drill", drill_tab),
+                           ("Stats", stats_tab)):
+            self.pages[name] = page
+            b = theme.button(sidebar, name, command=lambda n=name: self.show_page(n),
+                             kind="ghost", anchor="w", height=42)
+            b.pack(fill="x", padx=12, pady=2)
+            self.nav_buttons[name] = b
+
+        self.show_page("Puzzle Review")
+
+    def show_page(self, name: str) -> None:
+        for page_name, page in self.pages.items():
+            if page_name == name:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
+        for button_name, b in self.nav_buttons.items():
+            selected = button_name == name
+            b.configure(fg_color=theme.CONTROL_BG if selected else "transparent",
+                        text_color=theme.TEXT if selected else theme.TEXT_SOFT,
+                        font=theme.FONT_BOLD if selected else theme.FONT_BASE)
 
 
 if __name__ == "__main__":

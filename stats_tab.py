@@ -7,15 +7,22 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
+import customtkinter as ctk
+
+from tkinter import messagebox
+
 import db
+import opening_importer
 import openings_catalog
+import repertoire_gaps
 import stats
 import style
 import theme
 
-from models import TIME_FILTERS as FILTERS
+from models import TIME_FILTERS as FILTERS, PlayerColor
 
 MIN_OPENING_GAMES = 3
+REPERTOIRE_FROM_GAMES = "From my games"
 BAR_WIDTH = 12
 
 
@@ -28,43 +35,52 @@ def _pct(part: int, whole: int) -> str:
     return f"{100 * part / whole:.0f}%" if whole else "–"
 
 
-class StatsTab(ttk.Frame):
-    def __init__(self, master, conn, on_drill=None):
-        super().__init__(master, padding=(20, 14))
+class StatsTab(ctk.CTkFrame):
+    def __init__(self, master, conn, on_drill=None, on_repertoire_changed=None):
+        super().__init__(master, fg_color="transparent")
         self.conn = conn
         # on_drill(CatalogOpening): opens that opening in the Opening Drill tab
         self.on_drill = on_drill
-        style = ttk.Style(self)
-        style.configure("Treeview", font=theme.FONT_BASE, rowheight=24,
-                        background=theme.PANEL_BG, fieldbackground=theme.PANEL_BG)
-        style.configure("Treeview.Heading", font=theme.FONT_BOLD)
-        style.map("Treeview", background=[("selected", theme.ACCENT)])
+        # called after a line is added from the Repertoire page (refreshes Opening Drill)
+        self.on_repertoire_changed = on_repertoire_changed
         self._build_layout()
         self.bind("<Map>", lambda e: self.refresh())
 
     def _build_layout(self) -> None:
-        top = ttk.Frame(self)
+        outer = ctk.CTkFrame(self, fg_color="transparent")
+        outer.pack(fill="both", expand=True, padx=24, pady=20)
+
+        top = ctk.CTkFrame(outer, fg_color="transparent")
         top.pack(fill="x")
-        ttk.Label(top, text="Your weaknesses", style="Heading.TLabel").pack(side="left")
-        self.summary_label = ttk.Label(top, text="", style="Muted.TLabel")
-        self.summary_label.pack(side="left", padx=(12, 0), pady=(6, 0))
+        theme.label(top, "Stats", "title").pack(side="left")
+        self.page_switch = ctk.CTkSegmentedButton(
+            top, values=["Overview", "Playing style", "Repertoire"], command=self._show_stats_page,
+            height=34, font=theme.FONT_BOLD, fg_color=theme.PANEL_BG,
+            selected_color=theme.CONTROL_BG, selected_hover_color=theme.CONTROL_BG,
+            unselected_color=theme.PANEL_BG, unselected_hover_color=theme.PANEL_ALT,
+            text_color=theme.TEXT,
+        )
+        self.page_switch.pack(side="left", padx=(24, 0))
 
         self.filter_var = tk.StringVar(value=db.get_setting(self.conn, "stats_filter") or "All games")
         if self.filter_var.get() not in FILTERS:
             self.filter_var.set("All games")
-        dropdown = ttk.Combobox(top, textvariable=self.filter_var, values=list(FILTERS),
-                                state="readonly", width=20)
-        dropdown.pack(side="right")
-        dropdown.bind("<<ComboboxSelected>>", lambda e: self.refresh())
-        ttk.Label(top, text="Games", style="TLabel").pack(side="right", padx=(0, 8))
+        theme.option_menu(top, list(FILTERS), self.filter_var, lambda _: self.refresh(),
+                          width=170).pack(side="right")
+        theme.label(top, "Games", "muted").pack(side="right", padx=(0, 8))
+        self.summary_label = theme.label(outer, "", "muted")
+        self.summary_label.pack(anchor="w", pady=(4, 0))
 
-        pages = ttk.Notebook(self)
-        pages.pack(fill="both", expand=True, pady=(10, 0))
-        grid = ttk.Frame(pages, padding=(0, 10, 0, 0))
-        style_page = ttk.Frame(pages, padding=(0, 6, 0, 0))
-        pages.add(grid, text="Overview")
-        pages.add(style_page, text="Playing style")
+        pages = ctk.CTkFrame(outer, fg_color="transparent")
+        pages.pack(fill="both", expand=True, pady=(12, 0))
+        grid = ctk.CTkFrame(pages, fg_color="transparent")
+        style_page = ctk.CTkFrame(pages, fg_color="transparent")
+        rep_page = ctk.CTkFrame(pages, fg_color="transparent")
+        self._stats_pages = {"Overview": grid, "Playing style": style_page, "Repertoire": rep_page}
         self._build_style_page(style_page)
+        self._build_repertoire_page(rep_page)
+        self.page_switch.set("Overview")
+        self._show_stats_page("Overview")
 
         grid.columnconfigure((0, 1), weight=1, uniform="col")
         grid.rowconfigure((0, 1), weight=1, uniform="row")
@@ -95,13 +111,18 @@ class StatsTab(ttk.Frame):
         )
 
     def _build_style_page(self, page) -> None:
-        self.verdict_label = ttk.Label(page, text="", style="Status.TLabel", wraplength=880, justify="left")
-        self.verdict_label.pack(anchor="w")
-        self.style_note_label = ttk.Label(page, text="", style="Muted.TLabel", wraplength=880, justify="left")
-        self.style_note_label.pack(anchor="w", pady=(2, 0))
+        verdict_card = theme.card(page, fg_color="#1F1A12", border_color="#4A3A1E")
+        verdict_card.pack(fill="x")
+        verdict = ctk.CTkFrame(verdict_card, fg_color="transparent")
+        verdict.pack(fill="x", padx=20, pady=14)
+        theme.label(verdict, "YOUR STYLE", "section", text_color=theme.ACCENT_HOVER).pack(anchor="w")
+        self.verdict_label = theme.label(verdict, "", "heading", wraplength=900)
+        self.verdict_label.pack(anchor="w", fill="x", pady=(2, 0))
+        self.style_note_label = theme.label(verdict, "", "muted", wraplength=900)
+        self.style_note_label.pack(anchor="w", fill="x", pady=(2, 0))
 
-        grid = ttk.Frame(page)
-        grid.pack(fill="both", expand=True, pady=(8, 0))
+        grid = ctk.CTkFrame(page, fg_color="transparent")
+        grid.pack(fill="both", expand=True, pady=(12, 0))
         grid.columnconfigure((0, 1), weight=1, uniform="col")
         grid.rowconfigure((0, 1), weight=1, uniform="row")
 
@@ -130,8 +151,112 @@ class StatsTab(ttk.Frame):
              ("fit", "Fit", 85), ("you", "You", 75)],
         )
         self.recommend_tree.bind("<Double-1>", lambda e: self._drill_selected())
-        ttk.Button(self.recommend_tree.master.master, text="Drill selected opening",
-                   style="Secondary.TButton", command=self._drill_selected).pack(anchor="e", pady=(6, 0))
+        theme.button(self.recommend_tree.master.master, "Drill selected opening",
+                     self._drill_selected, "primary", height=34).pack(anchor="e", pady=(8, 0))
+
+    def _show_stats_page(self, name: str) -> None:
+        for page_name, page in self._stats_pages.items():
+            if page_name == name:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
+        if name == "Repertoire":
+            self._refresh_repertoire()
+
+    # ---------- Repertoire page: what you face vs what you've prepared ----------
+
+    def _build_repertoire_page(self, page) -> None:
+        self.rep_note_label = theme.label(page, "", "muted", wraplength=900)
+        self.rep_note_label.pack(anchor="w", fill="x", pady=(0, 8))
+        grid = ctk.CTkFrame(page, fg_color="transparent")
+        grid.pack(fill="both", expand=True)
+        grid.columnconfigure(0, weight=1)
+        grid.rowconfigure((0, 1), weight=1, uniform="row")
+        self.gaps_tree = self._section(
+            grid, 0, 0, "Where your games leave your repertoire",
+            "The first move in each game that your prep doesn't cover, most frequent first. "
+            "Select one and click Add to put it (with a suggested reply) in your repertoire.",
+            [("type", "Line (first uncovered move last)", 330), ("color", "As", 55),
+             ("who", "Who left", 120), ("games", "Games", 60), ("score", "Score", 60),
+             ("reply", "Suggested reply", 160)],
+        )
+        self.common_tree = self._section(
+            grid, 1, 0, "Lines you face most (first 3 moves)",
+            "Your most common openings. ✓ = already covered by your repertoire.",
+            [("type", "Line", 330), ("opening", "Opening", 260), ("color", "As", 55),
+             ("games", "Games", 60), ("score", "Score", 60), ("rep", "In rep", 60)],
+        )
+        for tree in (self.gaps_tree, self.common_tree):
+            theme.button(tree.master.master, "Add selected to repertoire",
+                         lambda t=tree: self._add_selected_to_repertoire(t),
+                         "primary", height=34).pack(anchor="e", pady=(8, 0))
+        self._rep_items = {}
+
+    def _refresh_repertoire(self) -> None:
+        self.configure(cursor="watch")
+        self.update_idletasks()
+        try:
+            r = repertoire_gaps.compute(self.conn, FILTERS[self.filter_var.get()])
+        finally:
+            self.configure(cursor="")
+        for tree in (self.gaps_tree, self.common_tree):
+            tree.delete(*tree.get_children())
+        self._rep_items = {}
+
+        missing = [c.capitalize() for c, has in r.has_repertoire.items() if not has]
+        note = f"From the first {repertoire_gaps.MAX_PLY // 2} moves of {r.games} games."
+        if missing:
+            note += (f" You have no {' or '.join(missing)} repertoire yet, so those games only "
+                     "appear under Lines you face most — add the most common ones from there.")
+        self.rep_note_label.configure(text=note)
+
+        for i, g in enumerate(gp for gp in r.gaps if r.has_repertoire[gp.color]):
+            iid = f"gap{i}"
+            self._rep_items[iid] = g
+            reply = f"{g.suggestion} ({g.suggestion_source})" if g.suggestion else (
+                "–" if g.by_opponent else f"{g.move} (what you play)")
+            self.gaps_tree.insert("", "end", iid=iid, values=(
+                g.line, g.color.capitalize(), g.who, g.record.games,
+                f"{100 * g.record.score:.0f}%", reply,
+            ))
+        for i, c in enumerate(r.common[:60]):
+            iid = f"common{i}"
+            self._rep_items[iid] = c
+            self.common_tree.insert("", "end", iid=iid, values=(
+                repertoire_gaps.format_line(c.sans), c.opening, c.color.capitalize(),
+                c.record.games, f"{100 * c.record.score:.0f}%", "✓" if c.in_repertoire else "",
+            ))
+
+    def _add_selected_to_repertoire(self, tree) -> None:
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Nothing selected", "Select a line in the table first.", parent=self)
+            return
+        item = self._rep_items[selection[0]]
+        color = PlayerColor(item.color)
+        if isinstance(item, repertoire_gaps.Gap):
+            name = f"{item.opening} — {item.line}"
+            pgn = repertoire_gaps.gap_pgn(item, name[:90])
+            if pgn is None:
+                messagebox.showinfo("No reply to add",
+                                    "There's no suggested reply for this position yet. Analyze more "
+                                    "games, or add the line by hand with Paste / type a line.", parent=self)
+                return
+        else:
+            name = f"{item.opening} — {repertoire_gaps.format_line(item.sans)}"
+            pgn = f'[Event "{name[:90]}"]\n\n{repertoire_gaps.format_line(item.sans)} *\n'
+
+        rep = REPERTOIRE_FROM_GAMES
+        added = opening_importer.import_pgn_text(pgn, rep, color, self.conn)
+        messagebox.showinfo(
+            "Added to repertoire" if added else "Already there",
+            f"Added to '{rep}' ({color.value}). Drill it in Opening Drill, and extend it "
+            "with Paste / type a line." if added else f"That line is already in '{rep}'.",
+            parent=self,
+        )
+        if self.on_repertoire_changed:
+            self.on_repertoire_changed()
+        self._refresh_repertoire()
 
     def _drill_selected(self) -> None:
         selection = self.recommend_tree.selection()
@@ -140,12 +265,12 @@ class StatsTab(ttk.Frame):
 
     def _refresh_style(self, classes, opening_records) -> None:
         r = style.compute_style(self.conn, classes)
-        self.verdict_label.config(text=r.verdict)
+        self.verdict_label.configure(text=r.verdict)
         note = f"Based on {r.games} Stockfish-analyzed games in this filter."
         if r.multipv_games < r.games:
             note += (f" {r.games - r.multipv_games} were analyzed before top-3 engine moves were "
                      "recorded — Analyze new games re-analyzes them for more accurate labels.")
-        self.style_note_label.config(text=note)
+        self.style_note_label.configure(text=note)
 
         rows = []
         for name, p in r.accuracy.items():
@@ -183,13 +308,15 @@ class StatsTab(ttk.Frame):
             ))
 
     def _section(self, parent, row, col, title, help_text, columns) -> ttk.Treeview:
-        frame = ttk.Frame(parent, padding=(0, 0, 12 if col == 0 else 0, 12))
-        frame.grid(row=row, column=col, sticky="nsew")
-        ttk.Label(frame, text=title, style="Section.TLabel").pack(anchor="w")
-        ttk.Label(frame, text=help_text, style="Muted.TLabel", wraplength=440,
-                  justify="left").pack(anchor="w", pady=(0, 4))
+        frame = theme.card(parent)
+        frame.grid(row=row, column=col, sticky="nsew",
+                   padx=(0, 8) if col == 0 else (8, 0), pady=(0, 8) if row == 0 else (8, 0))
+        inner = ctk.CTkFrame(frame, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=16, pady=14)
+        theme.label(inner, title, "heading").pack(anchor="w")
+        theme.label(inner, help_text, "muted", wraplength=440).pack(anchor="w", fill="x", pady=(0, 8))
 
-        body = ttk.Frame(frame)
+        body = ctk.CTkFrame(inner, fg_color="transparent")
         body.pack(fill="both", expand=True)
         tree = ttk.Treeview(body, columns=[c[0] for c in columns], show="headings", height=6)
         for key, heading, width in columns:
@@ -197,7 +324,8 @@ class StatsTab(ttk.Frame):
             tree.column(key, width=width,
                         anchor="w" if key in ("opening", "bar", "metric", "type") else "center",
                         stretch=key in ("opening", "metric", "type"))
-        scroll = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        scroll = ctk.CTkScrollbar(body, command=tree.yview, button_color=theme.CONTROL_BG,
+                                  fg_color="transparent")
         tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="left", fill="y")
@@ -222,7 +350,7 @@ class StatsTab(ttk.Frame):
     def refresh(self) -> None:
         db.set_setting(self.conn, "stats_filter", self.filter_var.get())
         s = stats.compute(self.conn, FILTERS[self.filter_var.get()])
-        self.summary_label.config(
+        self.summary_label.configure(
             text=f"{s.total_games} games · {s.engine_games} with Stockfish data"
         )
         for tree in (self.openings_tree, self.losses_tree, self.phase_tree, self.clock_tree,
@@ -230,6 +358,8 @@ class StatsTab(ttk.Frame):
                      self.recommend_tree):
             tree.delete(*tree.get_children())
         self._refresh_style(FILTERS[self.filter_var.get()], s.openings)
+        if self.page_switch.get() == "Repertoire":
+            self._refresh_repertoire()
 
         # openings: most-played first; weak (<40% score) highlighted
         rows = [(k, r) for k, r in s.openings.items() if r.games >= MIN_OPENING_GAMES]

@@ -1,0 +1,15 @@
+[Event "London - vs ...d5, e6, c5"]
+
+1. d4 d5 2. Bf4 {The London: the bishop comes out before e3 locks it in.} Nf6 3. e3 e6 4. Nf3 c5 {Black's most principled plan: pressure on d4.} 5. c3 {The pyramid - d4 is now rock solid.} Nc6 6. Nbd2 Bd6 {Offers to trade White's key bishop.} 7. Bg3 {Keep the bishop; if ...Bxg3, hxg3 opens the h-file for White.} O-O 8. Bd3 {Bishop aims at h7, the classic London attacking diagonal.} b6 9. Ne5 {The knight takes the outpost; f4 and Qf3 can follow for a kingside attack.} *
+
+[Event "London - vs King's Indian setup"]
+
+1. d4 Nf6 2. Bf4 g6 {Black goes for a King's Indian-style fianchetto.} 3. e3 Bg7 4. Nf3 O-O 5. Be2 {Against ...g6 setups the bishop is less useful on d3.} d6 6. h3 {Gives the f4 bishop a retreat square on h2 against ...Nh5.} c5 7. c3 {Keeps d4 solid.} b6 8. O-O Bb7 9. Nbd2 {A quiet, solid position; White plays for a slow edge.} *
+
+[Event "London - vs early ...c5 and ...Qb6"]
+
+1. d4 d5 2. Bf4 c5 {Hits d4 immediately.} 3. e3 Nc6 4. c3 Qb6 {Targets b2 - the London bishop left the queenside.} 5. Qb3 {Offers a queen trade: if ...Qxb3, axb3 gives White the half-open a-file.} c4 {Black grabs queenside space.} 6. Qc2 Bf5 {Challenges the queen on the b1-h7 diagonal.} 7. Qc1 {The queen tucks back; White will play Nd2, Ngf3 and aim for e4.} e6 8. Nd2 *
+
+[Event "London - vs ...Bf5"]
+
+1. d4 d5 2. Bf4 Nf6 3. e3 Bf5 {Black copies White's setup.} 4. c4 {Against the mirror setup, c4 puts pressure on d5 and b7.} e6 5. Nc3 Bb4 {Pins the knight.} 6. Qb3 {Hits b7 and b4 at the same time.} Nc6 7. Nf3 *

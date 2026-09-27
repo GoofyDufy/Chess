@@ -1,31 +1,44 @@
-"""Shared visual theme for the app — a single place to tweak colors/fonts
-so every tab looks consistent."""
+"""Shared visual theme — the "Midnight study" look from the Claude Design
+mockup: dark toned neutrals, one warm amber accent, rounded cards
+(CustomTkinter). A single place to tweak colors/fonts so every screen
+matches. Tkinter-native widgets that CustomTkinter lacks (Listbox,
+Treeview, the board Canvas) are styled to match here too."""
 
 from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
 
+import customtkinter as ctk
+
 # ---- palette ----
-BG = "#F4F5F7"            # app background
-PANEL_BG = "#FFFFFF"      # card/panel background
-BORDER = "#E1E3E8"
-TEXT = "#1F2430"
-TEXT_MUTED = "#6B7280"
-ACCENT = "#3B6E4E"        # deep green, chess-board-adjacent
-ACCENT_HOVER = "#2F5A3F"
-ACCENT_TEXT = "#FFFFFF"
-SUCCESS = "#2E7D32"
-ERROR = "#C0392B"
+BG = "#111317"            # app background
+SIDEBAR_BG = "#16181D"
+PANEL_BG = "#1A1D23"      # card background
+PANEL_ALT = "#20242B"     # tiles / rows inside a card
+CONTROL_BG = "#2A2E37"    # selected nav item, track of bars, hover
+INPUT_BG = "#111317"
+BORDER = "#262A32"
+BORDER_STRONG = "#333844"
+TEXT = "#ECE8E1"
+TEXT_MUTED = "#9AA1AD"
+TEXT_SOFT = "#A9AFBA"
+ACCENT = "#E6A94A"        # warm amber
+ACCENT_HOVER = "#F0BC68"
+ACCENT_TEXT = "#1A1206"   # text on the accent
+SUCCESS = "#7DCB98"
+ERROR = "#E8735E"
+WARNING = "#E6A94A"
+INFO = "#8FB3E8"
 
 # board colors (kept here so drill/puzzle boards and the theme agree)
 # warm wood-tone palette (cream/brown), not flat green
 BOARD_LIGHT = "#F0D9B5"
-BOARD_DARK = "#B5885A"
+BOARD_DARK = "#B58863"
 BOARD_HIGHLIGHT = "#AFA23A"   # olive, for the selected square
 # from/to squares of the last move played, tinted per square color
-LAST_MOVE_LIGHT = "#F2E27A"
-LAST_MOVE_DARK = "#C9AE4E"
+LAST_MOVE_LIGHT = "#F3E27C"
+LAST_MOVE_DARK = "#CDB04F"
 
 # piece fill colors — cream for white pieces, dark brown for black, each
 # with a contrasting outline so they read clearly against either square
@@ -34,88 +47,113 @@ PIECE_WHITE_OUTLINE = "#3B2314"
 PIECE_BLACK_FILL = "#3B2314"
 PIECE_BLACK_OUTLINE = "#1C1108"
 
-FONT_FAMILY = "Segoe UI"  # falls back gracefully on non-Windows
-FONT_BASE = (FONT_FAMILY, 11)
-FONT_BOLD = (FONT_FAMILY, 11, "bold")
-FONT_HEADING = (FONT_FAMILY, 15, "bold")
-FONT_STATUS = (FONT_FAMILY, 13)
-FONT_SMALL = (FONT_FAMILY, 9)
+# Segoe UI ships with Windows; a serif display face (Georgia) stands in
+# for the mockup's Fraunces headings. Both fall back gracefully elsewhere.
+FONT_FAMILY = "Segoe UI"
+DISPLAY_FAMILY = "Georgia"
+FONT_BASE = (FONT_FAMILY, 13)
+FONT_BOLD = (FONT_FAMILY, 13, "bold")
+FONT_SMALL = (FONT_FAMILY, 11)
+FONT_STATUS = (FONT_FAMILY, 15, "bold")
+FONT_SECTION = (FONT_FAMILY, 12, "bold")
+FONT_HEADING = (DISPLAY_FAMILY, 17, "bold")
+FONT_TITLE = (DISPLAY_FAMILY, 24, "bold")
+FONT_STAT = (FONT_FAMILY, 20, "bold")
+# CustomTkinter sizes fonts in pixels, plain Tk in points — native widgets
+# (Listbox, Treeview) use negative sizes (= pixels) so text matches
+FONT_NATIVE = (FONT_FAMILY, -14)
+FONT_NATIVE_BOLD = (FONT_FAMILY, -12, "bold")
+
+RADIUS = 12
+
+_LABEL_KINDS = {
+    "title": (FONT_TITLE, TEXT),
+    "heading": (FONT_HEADING, TEXT),
+    "section": (FONT_SECTION, TEXT_SOFT),
+    "status": (FONT_STATUS, TEXT),
+    "body": (FONT_BASE, TEXT),
+    "muted": (FONT_SMALL, TEXT_MUTED),
+    "stat": (FONT_STAT, TEXT),
+}
 
 
-def apply_theme(root: tk.Tk) -> None:
-    root.configure(bg=BG)
+def apply_theme(root: tk.Misc) -> None:
+    ctk.set_appearance_mode("dark")
+    root.configure(fg_color=BG)
 
+    # ttk widgets still in use (Treeview in Stats, scrollbars) — dark to match
     style = ttk.Style(root)
-    # 'clam' is the most stylable built-in theme across platforms
     style.theme_use("clam")
+    style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])   # no border
+    style.configure("Treeview", background=PANEL_ALT, fieldbackground=PANEL_ALT,
+                    foreground=TEXT, font=FONT_NATIVE, rowheight=26, borderwidth=0)
+    style.configure("Treeview.Heading", background=PANEL_BG, foreground=TEXT_MUTED,
+                    font=FONT_NATIVE_BOLD, borderwidth=0, relief="flat", padding=(4, 4))
+    style.map("Treeview", background=[("selected", CONTROL_BG)], foreground=[("selected", TEXT)])
+    style.map("Treeview.Heading", background=[("active", PANEL_ALT)])
+    style.configure("Vertical.TScrollbar", background=CONTROL_BG, troughcolor=PANEL_BG,
+                    bordercolor=PANEL_BG, arrowcolor=TEXT_MUTED, relief="flat")
 
-    style.configure(".", background=BG, foreground=TEXT, font=FONT_BASE)
 
-    style.configure("TFrame", background=BG)
-    style.configure("Panel.TFrame", background=PANEL_BG)
+# ---------- widget factories (keep every screen consistent) ----------
 
-    style.configure("TLabel", background=BG, foreground=TEXT, font=FONT_BASE)
-    style.configure("Panel.TLabel", background=PANEL_BG, foreground=TEXT, font=FONT_BASE)
-    style.configure("Heading.TLabel", background=BG, foreground=TEXT, font=FONT_HEADING)
-    style.configure("Status.TLabel", background=BG, foreground=TEXT, font=FONT_STATUS)
-    style.configure("Muted.TLabel", background=BG, foreground=TEXT_MUTED, font=FONT_SMALL)
-    style.configure("Section.TLabel", background=BG, foreground=TEXT, font=FONT_BOLD)
+def label(master, text: str = "", kind: str = "body", **kwargs) -> ctk.CTkLabel:
+    font, color = _LABEL_KINDS[kind]
+    kwargs.setdefault("anchor", "w")
+    kwargs.setdefault("justify", "left")
+    kwargs.setdefault("text_color", color)
+    return ctk.CTkLabel(master, text=text, font=font, **kwargs)
 
-    # same roles, for labels sitting on a white panel/card
-    style.configure("PanelHeading.TLabel", background=PANEL_BG, foreground=TEXT, font=FONT_HEADING)
-    style.configure("PanelStatus.TLabel", background=PANEL_BG, foreground=TEXT, font=FONT_STATUS)
-    style.configure("PanelMuted.TLabel", background=PANEL_BG, foreground=TEXT_MUTED, font=FONT_SMALL)
 
-    style.configure("TRadiobutton", background=BG, foreground=TEXT, font=FONT_BASE)
-    style.configure("TSpinbox", fieldbackground=PANEL_BG, padding=4)
+def card(master, **kwargs) -> ctk.CTkFrame:
+    """Rounded, bordered panel used to group controls."""
+    kwargs.setdefault("fg_color", PANEL_BG)
+    kwargs.setdefault("corner_radius", 14)
+    kwargs.setdefault("border_width", 1)
+    kwargs.setdefault("border_color", BORDER)
+    return ctk.CTkFrame(master, **kwargs)
 
-    style.configure(
-        "Accent.TButton",
-        background=ACCENT, foreground=ACCENT_TEXT, font=FONT_BOLD,
-        padding=(14, 10), borderwidth=0, focusthickness=0,
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("disabled", "#A9BCAF"), ("active", ACCENT_HOVER), ("pressed", ACCENT_HOVER)],
-        foreground=[("disabled", "#EEF2EF")],
-    )
 
-    style.configure(
-        "Secondary.TButton",
-        background=PANEL_BG, foreground=TEXT, font=FONT_BASE,
-        padding=(14, 10), borderwidth=1, relief="solid",
-        bordercolor=BORDER, focusthickness=0,
-    )
-    style.map(
-        "Secondary.TButton",
-        background=[("active", BG), ("pressed", BG)],
-        foreground=[("disabled", "#A0A6B1")],
-    )
+def button(master, text: str, command=None, kind: str = "secondary", **kwargs) -> ctk.CTkButton:
+    """kind: 'primary' (amber), 'secondary' (outlined), 'ghost' (text only)."""
+    styles = {
+        "primary": dict(fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ACCENT_TEXT,
+                        text_color_disabled="#6B5A3A", font=FONT_BOLD, border_width=0),
+        "secondary": dict(fg_color=PANEL_ALT, hover_color=CONTROL_BG, text_color=TEXT,
+                          text_color_disabled=TEXT_MUTED, font=FONT_BOLD,
+                          border_width=1, border_color=BORDER_STRONG),
+        "ghost": dict(fg_color="transparent", hover_color=CONTROL_BG, text_color=TEXT_SOFT,
+                      font=FONT_BASE, border_width=0),
+    }
+    options = {**styles[kind], "height": 40, "corner_radius": 10, **kwargs}
+    return ctk.CTkButton(master, text=text, command=command, **options)
 
-    style.configure(
-        "TNotebook", background=BG, borderwidth=0, tabmargins=(8, 8, 8, 0),
-    )
-    style.configure(
-        "TNotebook.Tab",
-        background=BG, foreground=TEXT_MUTED, font=FONT_BOLD,
-        padding=(18, 10), borderwidth=0,
-    )
-    style.map(
-        "TNotebook.Tab",
-        background=[("selected", PANEL_BG)],
-        foreground=[("selected", TEXT)],
-    )
 
-    style.configure(
-        "TCombobox",
-        fieldbackground=PANEL_BG, background=PANEL_BG, foreground=TEXT,
-        padding=8,
+def entry(master, textvariable=None, width: int = 90, **kwargs) -> ctk.CTkEntry:
+    return ctk.CTkEntry(master, textvariable=textvariable, width=width, height=34,
+                        fg_color=INPUT_BG, border_color=BORDER_STRONG, text_color=TEXT,
+                        corner_radius=8, font=FONT_BASE, **kwargs)
+
+
+def option_menu(master, values, variable=None, command=None, width: int = 160, **kwargs) -> ctk.CTkOptionMenu:
+    return ctk.CTkOptionMenu(
+        master, values=values, variable=variable, command=command, width=width, height=34,
+        fg_color=PANEL_ALT, button_color=CONTROL_BG, button_hover_color=BORDER_STRONG,
+        text_color=TEXT, dropdown_fg_color=PANEL_ALT, dropdown_hover_color=CONTROL_BG,
+        dropdown_text_color=TEXT, corner_radius=8, font=FONT_BASE, dropdown_font=FONT_BASE,
+        dynamic_resizing=False, **kwargs,
     )
 
 
-def panel(master, **kwargs) -> ttk.Frame:
-    """A white 'card' frame with a subtle border, used to group controls."""
-    outer = tk.Frame(master, bg=BORDER, **kwargs)
-    inner = ttk.Frame(outer, style="Panel.TFrame")
-    inner.pack(fill="both", expand=True, padx=1, pady=1)
-    return inner
+def progress_bar(master) -> ctk.CTkProgressBar:
+    return ctk.CTkProgressBar(master, height=6, corner_radius=3, fg_color=CONTROL_BG,
+                              progress_color=SUCCESS)
+
+
+def listbox(master, **kwargs) -> tk.Listbox:
+    """CustomTkinter has no list widget — a flat dark tk.Listbox instead."""
+    return tk.Listbox(
+        master, activestyle="none", font=FONT_NATIVE, bg=PANEL_ALT, fg=TEXT,
+        selectbackground=CONTROL_BG, selectforeground=TEXT, relief="flat", borderwidth=0,
+        highlightthickness=0, exportselection=False, **kwargs,
+    )

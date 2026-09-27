@@ -1,0 +1,19 @@
+[Event "Scotch - Mieses Variation"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 {The Scotch: opens the center at once.} exd4 4. Nxd4 Nf6 {Counterattacks e4.} 5. Nxc6 {Trades first so Black recaptures with a pawn.} bxc6 6. e5 {Kicks the knight and gains space.} Qe7 {Pins the e5 pawn to White's king.} 7. Qe2 {Unpins; Black's queen now blocks the f8 bishop.} Nd5 8. c4 {Kicks the knight again.} Ba6 {Pins the c4 pawn against White's queen.} 9. b3 {Supports c4.} O-O-O {Black castles long, targeting White's center.} 10. g3 {The bishop heads to g2 to hit Black's weak queenside.} *
+
+[Event "Scotch - Classical, 5.Nxc6"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Nxd4 Bc5 {Hits the d4 knight.} 5. Nxc6 {Trades before Black can build more pressure.} Qf6 {Queen and bishop both hit f2 - watch out for Qxf2+.} 6. Qd2 {Covers f2 and keeps material.} dxc6 7. Nc3 Be6 8. Na4 {Hunts the dark-squared bishop.} Rd8 {Pins the queen on the d-file.} 9. Bd3 {Blocks the file and develops; castling is next.} *
+
+[Event "Scotch - Classical, 5.Be3"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Nxd4 Bc5 5. Be3 {Defends the knight with development.} Qf6 {Piles up on d4.} 6. c3 {Solid support for the d4 knight.} Nge7 7. Bc4 {Active bishop aiming at f7.} Ne5 {Kicks the bishop.} 8. Be2 Qg6 {Hits g2 and e4.} 9. O-O d6 *
+
+[Event "Scotch - Steinitz, 4...Qh4"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Nxd4 Qh4 {The Steinitz: attacks e4 immediately.} 5. Nc3 {Defends e4 with development.} Bb4 {Pins the defender.} 6. Be2 {Offers the e4 pawn for fast development.} Qxe4 7. Nb5 {Threatens Nxc7+ forking king and rook.} Bxc3+ 8. bxc3 Kd8 {Black defends c7, but the king is stuck in the center.} 9. O-O {White has a big lead in development for the pawn.} *
+
+[Event "Scotch Gambit - 4.Bc4"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 exd4 4. Bc4 {The Scotch Gambit: development over material, aiming at f7.} Bc5 5. c3 {Offers another pawn to open lines.} Nf6 6. e5 {Kicks the knight.} d5 {Black's best: counterattacks the c4 bishop.} 7. Bb5 Ne4 8. cxd4 {Regains the pawn with a big center.} Bb4+ 9. Bd2 Nxd2 10. Nbxd2 {White has a strong center.} O-O *

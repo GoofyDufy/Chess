@@ -150,6 +150,13 @@ class OpeningDrillSession:
         self.path_index += 1
         return node.move_san
 
+    def last_move_note(self) -> Optional[str]:
+        """The PGN comment (explanation) on the most recently played move
+        of the line, if the imported file had one."""
+        if self.path_index == 0:
+            return None
+        return self.target_path[self.path_index - 1].notes
+
     def full_line_san(self) -> List[str]:
         """SAN move list for the whole drilled line, in order — for the
         end-of-line recap."""

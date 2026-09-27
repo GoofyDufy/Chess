@@ -3,32 +3,32 @@
 [Black "Opponent"]
 [Result "*"]
 
-1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Bg5 Be7 5. e3 O-O 6. Nf3 Nbd7 *
+1. d4 {Claims the center and frees the c1 bishop.} d5 2. c4 {The Queen's Gambit: offers a wing pawn to pull Black's d-pawn away from the center.} e6 {Declines solidly, but locks in Black's c8 bishop - Black's long-term problem.} 3. Nc3 {Adds a third attacker on d5.} Nf6 4. Bg5 {Pins the f6 knight, so it can't defend d5 as well.} Be7 {Breaks the pin and prepares to castle.} 5. e3 {Opens the f1 bishop's diagonal and keeps d4 rock solid.} O-O 6. Nf3 {Natural development; next come Rc1 and Bd3.} Nbd7 {Supports ...c5 or ...e5 later to free Black's game.} *
 
 [Event "Queens Gambit - Accepted"]
 [White "You"]
 [Black "Opponent"]
 [Result "*"]
 
-1. d4 d5 2. c4 dxc4 3. Nf3 Nf6 4. e3 e6 5. Bxc4 c5 6. O-O a6 *
+1. d4 d5 2. c4 dxc4 {Black takes, but can't keep the pawn for long.} 3. Nf3 {Stops ...e5 and develops before regaining c4.} Nf6 4. e3 {Opens the diagonal - Bxc4 is coming.} e6 5. Bxc4 {Pawn regained with a well-placed bishop.} c5 {Black's key freeing move, hitting d4.} 6. O-O {Castle first; if ...cxd4, White often gets an active isolated d-pawn.} a6 {Prepares ...b5 to kick the c4 bishop.} *
 
 [Event "Queens Gambit - Slav Defense"]
 [White "You"]
 [Black "Opponent"]
 [Result "*"]
 
-1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 dxc4 5. a4 Bf5 *
+1. d4 d5 2. c4 c6 {The Slav: defends d5 but keeps the c8 bishop's diagonal open.} 3. Nf3 Nf6 4. Nc3 dxc4 {Black grabs the pawn, hoping for ...b5.} 5. a4 {Stops ...b5 so the c4 pawn can be won back.} Bf5 {The bishop gets outside the pawn chain before ...e6 - the point of the Slav.} *
 
 [Event "Queens Gambit - Semi-Slav Defense"]
 [White "You"]
 [Black "Opponent"]
 [Result "*"]
 
-1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 e6 *
+1. d4 d5 2. c4 c6 3. Nf3 Nf6 4. Nc3 e6 {The Semi-Slav triangle (c6-d5-e6): very solid, but ...dxc4 and ...b5 can make it sharp. Main choices now: 5.e3 (Meran) or 5.Bg5.} *
 
 [Event "Queens Gambit - Exchange Variation"]
 [White "You"]
 [Black "Opponent"]
 [Result "*"]
 
-1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. cxd5 exd5 *
+1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. cxd5 {White fixes the structure early.} exd5 {The Carlsbad structure. White's standard plan: the minority attack with b4-b5 against c6.} *

@@ -1,0 +1,15 @@
+[Event "Catalan - Open, Classical 7.Qc2"]
+
+1. d4 Nf6 2. c4 e6 3. g3 {The Catalan move: the bishop will go to g2 and hit the long diagonal.} d5 4. Bg2 Be7 5. Nf3 O-O 6. O-O dxc4 {Black takes the pawn - the Open Catalan.} 7. Qc2 {Heads to win c4 back while keeping pressure on the diagonal.} a6 {Black tries to hold c4 with ...b5.} 8. Qxc4 b5 9. Qc2 Bb7 {Black challenges the g2 bishop's diagonal.} 10. Bd2 {Quiet development; Ba5 and Rc1 put pressure on Black's queenside.} *
+
+[Event "Catalan - Closed"]
+
+1. d4 Nf6 2. c4 e6 3. g3 d5 4. Bg2 Be7 5. Nf3 O-O 6. O-O Nbd7 {Closed Catalan: Black keeps the pawn on d5.} 7. Qc2 {Supports a future e4 break.} c6 {Solid - blunts the g2 bishop's diagonal.} 8. Nbd2 {The knight backs up e4 instead of blocking the c-pawn.} b6 9. e4 {White's key central break.} Bb7 10. b3 {Protects c4 and prepares Bb2; White has more space.} *
+
+[Event "Catalan - Open, 4...dxc4 5...a6"]
+
+1. d4 Nf6 2. c4 e6 3. g3 d5 4. Bg2 dxc4 {Takes the pawn early.} 5. Nf3 a6 {Plans ...b5 to keep the pawn.} 6. O-O Nc6 {Pressure on d4.} 7. e3 {Solidifies d4 so the knight on c6 has nothing to hit.} Bd7 8. Qe2 {Prepares to win back c4 with Rd1 and e4 in the center.} b5 9. Rd1 {Rook opposite Black's queen and supporting d4-d5 ideas.} Bd6 *
+
+[Event "Catalan - 4...Bb4+"]
+
+1. d4 Nf6 2. c4 e6 3. g3 d5 4. Bg2 Bb4+ {Trades off White's good dark-squared bishop, or disrupts development.} 5. Bd2 Be7 {The bishop retreats, having lured White's bishop to d2.} 6. Nf3 O-O 7. O-O c6 8. Qc2 {Controls e4 and eyes h7.} b6 9. Bf4 {The bishop comes back to a more active square.} Ba6 {Black puts pressure on c4.} *
