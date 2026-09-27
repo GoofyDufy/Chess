@@ -7,6 +7,7 @@ Desktop GUI for the chess prep app. Three screens, picked from a sidebar:
      the computer randomly playing the opponent's side and correcting
      you when you deviate from your prep.
   3. Stats — weaknesses, playing style, and openings that fit it.
+  4. Game Review, Progress (rating vs goal), Opponent Prep (scout a player).
 
 Run: python gui.py
 Requires: pip install -r requirements.txt
@@ -22,7 +23,10 @@ import db
 import theme
 from board_widget import BOARD_PIXELS
 from drill_tab import OpeningDrillTab
+from game_review_tab import GameReviewTab
+from progress_tab import ProgressTab
 from puzzle_tab import PuzzleReviewTab
+from scout_tab import ScoutTab
 from stats_tab import StatsTab
 
 SIDEBAR_WIDTH = 200
@@ -60,7 +64,12 @@ class App(ctk.CTk):
 
         self.pages = {}
         self.nav_buttons = {}
-        puzzle_tab = PuzzleReviewTab(content, self.conn)
+        def review_game(game_id, fen):
+            self.show_page("Game Review")
+            review_tab.open_game(game_id, fen)
+
+        puzzle_tab = PuzzleReviewTab(content, self.conn, on_review_game=review_game)
+        review_tab = GameReviewTab(content, self.conn)
         drill_tab = OpeningDrillTab(content, self.conn)
 
         def drill_opening(opening):
@@ -70,8 +79,12 @@ class App(ctk.CTk):
         stats_tab = StatsTab(content, self.conn, on_drill=drill_opening,
                              on_repertoire_changed=drill_tab._refresh_repertoire_list)
 
-        for name, page in (("Puzzle Review", puzzle_tab), ("Opening Drill", drill_tab),
-                           ("Stats", stats_tab)):
+        progress_tab = ProgressTab(content, self.conn)
+        scout_tab = ScoutTab(content, self.conn)
+
+        for name, page in (("Puzzle Review", puzzle_tab), ("Game Review", review_tab),
+                           ("Opening Drill", drill_tab), ("Stats", stats_tab),
+                           ("Progress", progress_tab), ("Opponent Prep", scout_tab)):
             self.pages[name] = page
             b = theme.button(sidebar, name, command=lambda n=name: self.show_page(n),
                              kind="ghost", anchor="w", height=42)

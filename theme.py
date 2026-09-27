@@ -11,6 +11,8 @@ from tkinter import ttk
 
 import customtkinter as ctk
 
+from paths import resource_dir
+
 # ---- palette ----
 BG = "#111317"            # app background
 SIDEBAR_BG = "#16181D"
@@ -47,10 +49,21 @@ PIECE_WHITE_OUTLINE = "#3B2314"
 PIECE_BLACK_FILL = "#3B2314"
 PIECE_BLACK_OUTLINE = "#1C1108"
 
-# Segoe UI ships with Windows; a serif display face (Georgia) stands in
-# for the mockup's Fraunces headings. Both fall back gracefully elsewhere.
-FONT_FAMILY = "Segoe UI"
-DISPLAY_FAMILY = "Georgia"
+def _load_bundled_fonts() -> bool:
+    """Manrope (body) + Fraunces (headings), the mockup's typefaces, are
+    bundled in fonts/ (SIL Open Font License) and loaded privately for this
+    process. Falls back to Segoe UI / Georgia if loading isn't possible."""
+    font_dir = resource_dir() / "fonts"
+    files = sorted(font_dir.glob("*.ttf")) if font_dir.is_dir() else []
+    try:
+        return bool(files) and all(ctk.FontManager.load_font(str(f)) for f in files)
+    except Exception:
+        return False
+
+
+_FONTS_OK = _load_bundled_fonts()
+FONT_FAMILY = "Manrope" if _FONTS_OK else "Segoe UI"
+DISPLAY_FAMILY = "Fraunces" if _FONTS_OK else "Georgia"
 FONT_BASE = (FONT_FAMILY, 13)
 FONT_BOLD = (FONT_FAMILY, 13, "bold")
 FONT_SMALL = (FONT_FAMILY, 11)

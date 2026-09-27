@@ -28,7 +28,7 @@ BAR_WIDTH = 12
 
 def _bar(fraction: float) -> str:
     filled = round(max(0.0, min(1.0, fraction)) * BAR_WIDTH)
-    return "█" * filled + "░" * (BAR_WIDTH - filled)
+    return "▰" * filled + "▱" * (BAR_WIDTH - filled)
 
 
 def _pct(part: int, whole: int) -> str:

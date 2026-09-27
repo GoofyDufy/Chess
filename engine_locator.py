@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-PROJECT_DIR = Path(__file__).parent
+from paths import app_dir, resource_dir
 
 
 def find_stockfish() -> Optional[str]:
@@ -26,11 +26,12 @@ def find_stockfish() -> Optional[str]:
     # 2. Look inside a 'stockfish' subfolder of the project for any
     #    executable whose name starts with 'stockfish' (covers Windows
     #    .exe builds and Mac/Linux binaries with version-specific names)
-    stockfish_dir = PROJECT_DIR / "stockfish"
-    if stockfish_dir.is_dir():
-        for path in stockfish_dir.rglob("stockfish*"):
-            if path.is_file() and os.access(path, os.X_OK) or path.suffix.lower() == ".exe":
-                return str(path)
+    #    (next to the project / the .exe first, then one bundled inside the .exe)
+    for stockfish_dir in (app_dir() / "stockfish", resource_dir() / "stockfish"):
+        if stockfish_dir.is_dir():
+            for path in stockfish_dir.rglob("stockfish*"):
+                if path.is_file() and (os.access(path, os.X_OK) or path.suffix.lower() == ".exe"):
+                    return str(path)
 
     # 3. Common install locations
     common_paths = [

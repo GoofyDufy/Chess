@@ -21,7 +21,9 @@ import analyzer
 import chess_com_client
 import db
 import engine_locator
+import stats
 import theme
+from play_window import PlayWindow
 from board_widget import BOARD_PIXELS, ChessBoardWidget
 from models import TIME_FILTERS, Game, Puzzle
 
@@ -32,6 +34,9 @@ TYPE_COLORS = {
     "Mistake": theme.INFO,
     "Inaccuracy": theme.TEXT_MUTED,
 }
+
+WEAK_SPOTS = "Weak spots"
+ENDGAMES = "Endgames"
 
 DEFAULT_THRESHOLD_PAWNS = "1.5"
 DEFAULT_GAMES_PER_RUN = "50"
@@ -65,9 +70,12 @@ def _swing_text(p: Puzzle) -> str:
 
 
 class PuzzleReviewTab(ctk.CTkFrame):
-    def __init__(self, master, conn):
+    def __init__(self, master, conn, on_review_game=None):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
+        # on_review_game(game_id, fen): open Game Review at that position
+        self.on_review_game = on_review_game
+        self._attempt_recorded = False
         self.queue: List[Puzzle] = []
         self.queue_index: int = -1
         self.current_puzzle: Optional[Puzzle] = None
@@ -112,8 +120,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         board_pad = ctk.CTkFrame(left, fg_color="transparent")
         board_pad.pack(padx=18, pady=16)
 
-        self.game_label = theme.label(board_pad, "", "muted")
-        self.game_label.pack(anchor="w", pady=(0, 8))
+        header = ctk.CTkFrame(board_pad, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 8))
+        theme.button(header, "Play it out", self._play_it_out, height=28, width=96).pack(side="right")
+        theme.button(header, "Review game", self._review_game, height=28, width=104).pack(
+            side="right", padx=(0, 6))
+        self.game_label = theme.label(header, "", "muted", wraplength=300)
+        self.game_label.pack(side="left", fill="x")
 
         self.board_widget = ChessBoardWidget(board_pad, self._on_move_attempt, bg=theme.PANEL_BG)
         self.board_widget.pack()
@@ -261,14 +274,26 @@ class PuzzleReviewTab(ctk.CTkFrame):
         games or changing the type filter. Randomly ordered, no due-date
         gating: every generated puzzle is browsable."""
         types = db.distinct_puzzle_types(self.conn)
-        self.type_filter_dropdown.configure(values=["All types"] + types)
-        if self.type_filter_var.get() not in ["All types"] + types:
+        options = ["All types", WEAK_SPOTS, ENDGAMES] + types
+        self.type_filter_dropdown.configure(values=options)
+        if self.type_filter_var.get() not in options:
             self.type_filter_var.set("All types")
 
         selected_type = self.type_filter_var.get()
-        filter_type = None if selected_type == "All types" else selected_type
+        filter_type = None if selected_type in ("All types", WEAK_SPOTS, ENDGAMES) else selected_type
         self.queue = db.all_puzzles(self.conn, puzzle_type=filter_type,
                                     time_classes=self._focus_classes())
+        if selected_type == WEAK_SPOTS:
+            # puzzles you keep missing, weakest first (solve twice in a row to clear one)
+            weak = db.weak_item_ids(self.conn, "puzzle")
+            self.queue = sorted((p for p in self.queue if p.id in weak), key=lambda p: -weak[p.id])
+        elif selected_type == ENDGAMES:
+            self.queue = [p for p in self.queue if stats.is_endgame(p.fen)]
+        empty_text = {
+            WEAK_SPOTS: "No weak spots right now. Puzzles you miss show up here until you "
+                        "solve them twice in a row.",
+            ENDGAMES: "No endgame puzzles in this filter yet.",
+        }.get(selected_type, "No puzzles yet. Import your games, then click Analyze new games.")
 
         self._refresh_listbox()
         if self.queue:
@@ -279,10 +304,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.current_game = None
             self.board_widget.clear()
             self.game_label.configure(text="")
-            self.status_label.configure(
-                text="No puzzles yet. Import your games, then click Analyze new games.",
-                text_color=theme.TEXT_MUTED,
-            )
+            self.status_label.configure(text=empty_text, text_color=theme.TEXT_MUTED)
             self.explanation_label.configure(text="")
             self._hide_retry_buttons()
 
@@ -342,6 +364,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.explanation_label.configure(text="")
         self.queue_index = index
         self.current_puzzle = self.queue[index]
+        self._attempt_recorded = False
         self.current_game = (
             db.get_game(self.conn, self.current_puzzle.source_game_id)
             if self.current_puzzle.source_game_id else None
@@ -384,6 +407,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         board.push(move)
         self.board_widget.redraw()
+        if not self._attempt_recorded:
+            # only the first try counts toward Weak spots / Progress
+            db.record_attempt(self.conn, "puzzle", self.current_puzzle.id, correct)
+            self._attempt_recorded = True
 
         if correct:
             self.attempt_state = "done"
@@ -399,6 +426,20 @@ class PuzzleReviewTab(ctk.CTkFrame):
             )
             self._show_retry_buttons()
 
+    def _play_it_out(self) -> None:
+        """Play the puzzle position against Stockfish — for endgames this
+        is the endgame trainer: can you actually convert it?"""
+        if self.current_puzzle is None:
+            return
+        PlayWindow(self, self.current_puzzle.fen,
+                   title=f"Play it out — {self.current_puzzle.puzzle_type or 'puzzle'}")
+
+    def _review_game(self) -> None:
+        if self.current_puzzle is None or not self.current_puzzle.source_game_id:
+            return
+        if self.on_review_game:
+            self.on_review_game(self.current_puzzle.source_game_id, self.current_puzzle.fen)
+
     def _on_retry(self) -> None:
         if self.current_puzzle is None:
             return
@@ -411,6 +452,9 @@ class PuzzleReviewTab(ctk.CTkFrame):
         if self.current_puzzle is None:
             return
         self.attempt_state = "done"
+        if not self._attempt_recorded:   # revealed without trying = a miss
+            db.record_attempt(self.conn, "puzzle", self.current_puzzle.id, False)
+            self._attempt_recorded = True
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))

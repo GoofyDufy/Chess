@@ -14,7 +14,11 @@ from models import (
 
 from analyzer import EVAL_VERSION
 
-DB_PATH = Path(__file__).parent / "chessprep.db"
+from paths import app_dir
+
+# next to the code, or next to the .exe when packaged (never inside the
+# .exe's temporary unpack folder, which is wiped on exit)
+DB_PATH = app_dir() / "chessprep.db"
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -93,6 +97,17 @@ CREATE TABLE IF NOT EXISTS review_state (
     consecutive_correct INTEGER,
     consecutive_wrong INTEGER
 );
+
+-- every puzzle / opening-line attempt: drives "Weak spots" practice and
+-- the Progress dashboard. item_type 'puzzle' (item_id = puzzle id) or
+-- 'line' (item_id = the drilled line's root id); correct = first try right.
+CREATE TABLE IF NOT EXISTS attempts (
+    item_type TEXT,
+    item_id TEXT,
+    correct INTEGER,
+    attempted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_attempts_item ON attempts (item_type, item_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -398,6 +413,51 @@ def distinct_puzzle_types(conn: sqlite3.Connection) -> List[str]:
         "SELECT DISTINCT puzzle_type FROM puzzles WHERE puzzle_type IS NOT NULL ORDER BY puzzle_type"
     ).fetchall()
     return [r["puzzle_type"] for r in rows]
+
+
+# ---------- Attempts (weak spots / progress) ----------
+
+def record_attempt(conn: sqlite3.Connection, item_type: str, item_id: str, correct: bool) -> None:
+    conn.execute(
+        "INSERT INTO attempts (item_type, item_id, correct, attempted_at) VALUES (?, ?, ?, ?)",
+        (item_type, item_id, int(correct), dt.datetime.now().isoformat()),
+    )
+    conn.commit()
+
+
+def weak_item_ids(conn: sqlite3.Connection, item_type: str) -> Dict[str, float]:
+    """Items you're still getting wrong -> weakness score (higher = weaker).
+    Any item you've ever missed stays weak until you solve it twice in a
+    row; the score is its miss count (+1 if the latest try was a miss)."""
+    rows = conn.execute(
+        "SELECT item_id, correct FROM attempts WHERE item_type = ? ORDER BY attempted_at",
+        (item_type,),
+    ).fetchall()
+    history: Dict[str, List[int]] = {}
+    for r in rows:
+        history.setdefault(r["item_id"], []).append(r["correct"])
+    weak = {}
+    for item_id, results in history.items():
+        misses = results.count(0)
+        if misses == 0 or results[-2:] == [1, 1]:
+            continue
+        weak[item_id] = misses + (1 if results[-1] == 0 else 0)
+    return weak
+
+
+def attempts_by_week(conn: sqlite3.Connection, item_type: str) -> List[Tuple[str, int, int]]:
+    """(ISO week start 'YYYY-MM-DD', attempts, first-try correct) per week."""
+    rows = conn.execute(
+        "SELECT attempted_at, correct FROM attempts WHERE item_type = ?", (item_type,)
+    ).fetchall()
+    weeks: Dict[str, List[int]] = {}
+    for r in rows:
+        day = dt.datetime.fromisoformat(r["attempted_at"]).date()
+        start = (day - dt.timedelta(days=day.weekday())).isoformat()
+        w = weeks.setdefault(start, [0, 0])
+        w[0] += 1
+        w[1] += r["correct"]
+    return [(k, v[0], v[1]) for k, v in sorted(weeks.items())]
 
 
 # ---------- Review state ----------

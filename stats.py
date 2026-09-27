@@ -130,6 +130,12 @@ def _phase(ply: int, fen: str) -> str:
     return "Endgame" if material <= ENDGAME_MATERIAL else "Middlegame"
 
 
+def is_endgame(fen: str) -> bool:
+    """Little non-pawn material left (see ENDGAME_MATERIAL)."""
+    board = chess.Board(fen)
+    return sum(_PIECE_POINTS.get(p.piece_type, 0) for p in board.piece_map().values()) <= ENDGAME_MATERIAL
+
+
 def _clock_bucket(seconds: float) -> str:
     for limit, label in CLOCK_BUCKETS:
         if seconds < limit:

@@ -14,8 +14,11 @@ from typing import Optional
 import chess
 
 import db
+import random
+
 import opening_importer
 import opening_notes
+from play_window import PlayWindow
 import theme
 from board_widget import BOARD_PIXELS, ChessBoardWidget
 from drill import DrillResult, OpeningDrillSession, format_move_list
@@ -55,6 +58,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         button_row.pack(pady=(10, 0), anchor="w")
         self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
         self.reveal_button = theme.button(button_row, "Show correct move", self._on_reveal, width=160)
+        self.play_button = theme.button(button_row, "Play it out vs Stockfish", self._play_it_out,
+                                        "primary", width=200)
+        self._line_missed = False
         # both hidden until a genuine (non-book) miss is made
 
         right = ctk.CTkFrame(self, fg_color="transparent")
@@ -136,9 +142,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         selection = self._selected_repertoire()
         if selection is None:
             return
-        sel = self.variation_listbox.curselection()
-        line_name = self._variation_roots[sel[0] - 1].line_name if sel and sel[0] > 0 else None
-        self._render_plans(line_name, selection[0], PlayerColor(selection[1]))
+        _, root, _ = self._selected_entry()
+        self._render_plans(root.line_name if root else None, selection[0], PlayerColor(selection[1]))
 
     def _render_plans(self, line_name: Optional[str], repertoire_name: str, my_color: PlayerColor) -> None:
         for child in self.plans_body.winfo_children():
@@ -391,16 +396,35 @@ class OpeningDrillTab(ctk.CTkFrame):
         roots = db.root_lines(self.conn, *selection) if selection else []
         roots.sort(key=lambda r: (r.line_name or r.move_san).lower())
         self._variation_roots = roots
-        self.variation_listbox.insert(tk.END, "Any line (random)")
-        for r in roots:
-            self.variation_listbox.insert(tk.END, r.line_name or r.move_san)
+        weak = db.weak_item_ids(self.conn, "line")
+        weak_count = sum(1 for r in roots if r.id in weak)
+        # (kind, root, label): "random" / "weak" (lines you keep missing) / "line"
+        self._variation_entries = [("random", None, "Any line (random)")]
+        if weak_count:
+            self._variation_entries.append(("weak", None, f"Weak lines ({weak_count} to fix)"))
+        self._variation_entries += [("line", r, r.line_name or r.move_san) for r in roots]
+        for _, _, label in self._variation_entries:
+            self.variation_listbox.insert(tk.END, label)
         self.variation_listbox.selection_set(0)
 
-    def _selected_root_id(self) -> Optional[str]:
+    def _selected_entry(self):
         sel = self.variation_listbox.curselection()
-        if not sel or sel[0] == 0:
-            return None
-        return self._variation_roots[sel[0] - 1].id
+        entries = getattr(self, "_variation_entries", [])
+        if not sel or sel[0] >= len(entries):
+            return ("random", None, "")
+        return entries[sel[0]]
+
+    def _selected_root_id(self) -> Optional[str]:
+        kind, root, _ = self._selected_entry()
+        if kind == "line":
+            return root.id
+        if kind == "weak":
+            # weighted pick: lines you've missed more come up more often
+            weak = db.weak_item_ids(self.conn, "line")
+            candidates = [r for r in self._variation_roots if r.id in weak]
+            if candidates:
+                return random.choices(candidates, weights=[weak[r.id] for r in candidates])[0].id
+        return None
 
     def _select_repertoire(self, name: str, my_color: PlayerColor) -> None:
         """Points the dropdown at a just-imported repertoire so Start drill
@@ -426,11 +450,11 @@ class OpeningDrillTab(ctk.CTkFrame):
 
         self._refresh_repertoire_list()
         self._select_repertoire(rep, my_color)
-        names = [r.line_name for r in self._variation_roots]
+        names = [root.line_name if root else None for _, root, _ in self._variation_entries]
         if line_name in names:
             self.variation_listbox.selection_clear(0, tk.END)
-            self.variation_listbox.selection_set(names.index(line_name) + 1)
-            self.variation_listbox.see(names.index(line_name) + 1)
+            self.variation_listbox.selection_set(names.index(line_name))
+            self.variation_listbox.see(names.index(line_name))
         self._start_drill()
 
     def _selected_repertoire(self):
@@ -447,11 +471,14 @@ class OpeningDrillTab(ctk.CTkFrame):
         name, color_str = selection
         my_color = PlayerColor(color_str)
 
+        kind, _, _ = self._selected_entry()
         self.session = OpeningDrillSession(self.conn, name, my_color)
         if not self.session.start(self._selected_root_id()):
             messagebox.showinfo("Empty repertoire", "That repertoire has no lines in it yet.")
             return
 
+        self._line_missed = False
+        self.play_button.pack_forget()
         self.recap_label.configure(text="")
         self.move_note_label.configure(text="")
         self._render_plans(self.session.line_name, name, my_color)
@@ -459,7 +486,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         self._show_right_view("Plans")
         self._hide_retry_buttons()
         self.start_button.configure(
-            text="New random line" if self._selected_root_id() is None else "Drill again"
+            text={"random": "New random line", "weak": "Next weak line"}.get(kind, "Drill again")
         )
         self.line_name_label.configure(text=f"Drilling: {self.session.line_name}")
         # show the board from your side when drilling Black
@@ -493,6 +520,17 @@ class OpeningDrillTab(ctk.CTkFrame):
                                  text_color=theme.SUCCESS)
         self.recap_label.configure(text=f"{self.session.line_name}:\n{recap}")
         self._hide_retry_buttons()
+        # one attempt per line: clean run = correct (clears it from Weak lines over time)
+        db.record_attempt(self.conn, "line", self.session.target_path[0].id, not self._line_missed)
+        self.play_button.pack(side="left")
+
+    def _play_it_out(self) -> None:
+        """Continue the finished line as a real game against Stockfish."""
+        if self.session is None:
+            return
+        color = chess.WHITE if self.session.my_color == PlayerColor.WHITE else chess.BLACK
+        PlayWindow(self, self.session.board.fen(), title=f"Play it out — {self.session.line_name}",
+                   my_color=color)
 
     def _on_my_move_attempt(self, move: chess.Move) -> None:
         if self.session is None or not self.session.is_my_turn():
@@ -507,6 +545,7 @@ class OpeningDrillTab(ctk.CTkFrame):
             self.after(700, self._advance)
         else:
             # nothing was pushed — board is unchanged, so retry just works
+            self._line_missed = True
             played_note = f"you played {result.played_san}" if result.played_san else "that's not the move here"
             if result.in_book:
                 self.status_label.configure(
@@ -536,6 +575,7 @@ class OpeningDrillTab(ctk.CTkFrame):
     def _on_reveal(self) -> None:
         if self.session is None:
             return
+        self._line_missed = True
         san = self.session.reveal_and_advance()
         self.board_widget.show_board(self.session.board)
         self._hide_retry_buttons()
