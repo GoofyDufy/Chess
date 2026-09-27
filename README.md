@@ -65,6 +65,40 @@ You have two ways to get lines in — neither depends on your own games:
 5. Click **New random line** any time for a fresh line from the same
    repertoire.
 
+## More screens
+
+- **Game Review** — step through any analyzed game: evaluation graph, your
+  mistakes marked (??/?/?!), Stockfish's better move as an arrow, and
+  "Next mistake". Also opens from a puzzle's **Review game** button.
+- **Play it out** — play any puzzle position (or the end of a drilled
+  opening line) against Stockfish at an adjustable strength. With the
+  puzzle queue's **Endgames** filter this doubles as an endgame trainer.
+- **Weak spots** — puzzles and opening lines you miss come back (puzzle
+  filter "Weak spots", drill option "Weak lines") until you solve them
+  twice in a row.
+- **Stats** — weaknesses, playing style (sharp vs quiet) with opening
+  recommendations, and **Repertoire**: where your games leave your prep.
+- **Progress** — rating over time against your goal, blunders per game,
+  puzzles per week.
+- **Opponent Prep** — scout any chess.com player's openings and see
+  whether your repertoire covers them.
+
+## Tests
+
+```
+python -m unittest discover tests
+```
+
+## Standalone app (no Python needed)
+
+```
+powershell -ExecutionPolicy Bypass -File build_exe.ps1
+```
+
+Builds `dist\ChessPrep\` (Stockfish and fonts bundled if a `stockfish\`
+folder exists). Zip that folder to share it; each player's data is stored
+in `chessprep.db` next to `ChessPrep.exe`.
+
 ## Not yet built (left for later)
 
 - Puzzle difficulty tuning beyond the flat `MISTAKE_THRESHOLD_CP` constant.

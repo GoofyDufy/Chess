@@ -5,6 +5,11 @@ chessprep.db-journal
 # engine binary: each user downloads the build for their own CPU/OS
 stockfish/
 
+# PyInstaller output (see build_exe.ps1)
+build/
+dist/
+*.spec
+
 __pycache__/
 *.pyc
 .vscode/
