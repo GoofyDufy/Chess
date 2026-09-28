@@ -35,6 +35,8 @@ class ScoutTab(ctk.CTkFrame):
         self.after(100, self._poll)
 
     def _poll(self) -> None:
+        if not self.winfo_exists():
+            return   # tab destroyed (player switched)
         try:
             while True:
                 self._ui_queue.get_nowait()()

@@ -1,6 +1,8 @@
 # personal data: your games, puzzles, username, settings
 chessprep.db
 chessprep.db-journal
+chessprep_*.db
+profiles.json
 
 # engine binary: each user downloads the build for their own CPU/OS
 stockfish/

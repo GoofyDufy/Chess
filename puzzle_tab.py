@@ -104,6 +104,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
         top.bind("<Right>", lambda e: self._on_arrow_key(self._go_next), add="+")
 
     def _poll_ui_queue(self) -> None:
+        if not self.winfo_exists():
+            return   # tab destroyed (player switched)
         try:
             while True:
                 callback = self._ui_queue.get_nowait()

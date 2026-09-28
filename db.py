@@ -128,12 +128,14 @@ def set_setting(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
-def get_connection() -> sqlite3.Connection:
+def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:
+    """Opens a database (default DB_PATH; the app passes the current
+    player profile's file — see profiles.py)."""
     # check_same_thread=False: the GUI runs import/analyze on background
     # threads so the window doesn't freeze, and they share this same
     # connection. We don't do concurrent writes from multiple threads at
     # once, so this is safe here.
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(path or DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     _migrate(conn)
