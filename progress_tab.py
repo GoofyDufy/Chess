@@ -5,18 +5,15 @@ each time the page is shown (no engine involved)."""
 from __future__ import annotations
 
 import datetime as dt
-import re
 import tkinter as tk
-from collections import OrderedDict
 
 import customtkinter as ctk
 
 import charts
 import db
+import progress_data
 import theme
-from models import time_class
 
-_ELO_RE = {"white": re.compile(r'\[WhiteElo "(\d+)"\]'), "black": re.compile(r'\[BlackElo "(\d+)"\]')}
 TIME_CLASSES = ["Rapid", "Blitz", "Bullet", "Daily"]
 DEFAULT_GOAL = "2000"
 
@@ -78,23 +75,6 @@ class ProgressTab(ctk.CTkFrame):
         canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         return canvas
 
-    # ---------- data ----------
-
-    def _ratings(self, tclass: str):
-        """[(date, rating)] of your rating in each game of this time class."""
-        out = []
-        for g in self.conn.execute("SELECT pgn, my_color, time_control, played_at FROM games ORDER BY played_at"):
-            if time_class(g["time_control"]) != tclass:
-                continue
-            m = _ELO_RE[g["my_color"]].search(g["pgn"])
-            if m:
-                out.append((dt.datetime.fromisoformat(g["played_at"]).date(), int(m.group(1))))
-        return out
-
-    @staticmethod
-    def _week(day: dt.date) -> dt.date:
-        return day - dt.timedelta(days=day.weekday())
-
     def refresh(self) -> None:
         tclass = self.class_var.get()
         db.set_setting(self.conn, "progress_class", tclass)
@@ -103,56 +83,30 @@ class ProgressTab(ctk.CTkFrame):
             db.set_setting(self.conn, "rating_goal", str(goal))
         except ValueError:
             goal = None
+        data = progress_data.compute(self.conn, tclass, goal)
 
-        ratings = self._ratings(tclass)
-        weekly = OrderedDict()
-        for day, rating in ratings:
-            weekly[self._week(day)] = rating          # last rating of each week
-        weekly = list(weekly.items())[-40:]           # last ~9 months keeps the chart readable
-        charts.line_chart(self.rating_chart, [(d.strftime("%b %d"), r) for d, r in weekly], goal=goal,
+        def label(iso: str) -> str:
+            return dt.date.fromisoformat(iso).strftime("%b %d")
+
+        charts.line_chart(self.rating_chart, [(label(d), r) for d, r in data["weekly_ratings"]], goal=goal,
                           empty_text=f"No {tclass.lower()} games yet")
-
-        # tiles
-        current = ratings[-1][1] if ratings else None
-        month_ago = next((r for d, r in reversed(ratings) if d <= dt.date.today() - dt.timedelta(days=30)), None)
-        peak = max((r for _, r in ratings), default=None)
-        week_start = self._week(dt.date.today()).isoformat()
-        puzzle_weeks = db.attempts_by_week(self.conn, "puzzle")
-        this_week = next(((a, c) for w, a, c in puzzle_weeks if w == week_start), (0, 0))
-        weak = len(db.weak_item_ids(self.conn, "puzzle"))
-        change = (current - month_ago) if current is not None and month_ago is not None else None
+        current, change = data["current_rating"], data["change_30_days"]
+        week = data["puzzles_this_week"]
         tiles = [
-            (str(current) if current else "–", f"current {tclass.lower()} rating"),
+            (str(current) if current else "–",
+             f"current {tclass.lower()} rating" + (f" (peak {data['peak_rating']})" if current else "")),
             (f"{change:+d}" if change is not None else "–", "last 30 days"),
-            (f"{goal - current}" if goal and current else "–", f"to go to {goal}" if goal else "set a goal"),
-            (f"{this_week[1]}/{this_week[0]}", "puzzles solved this week"),
-            (str(weak), "weak spots to fix"),
+            (str(data["to_goal"]) if data["to_goal"] is not None else "–",
+             f"to go to {goal}" if goal else "set a goal"),
+            (f"{week['solved']}/{week['tried']}", "puzzles solved this week"),
+            (str(data["weak_spots"]), "weak spots to fix"),
         ]
         for (value, caption), (vl, cl) in zip(tiles, self.tile_labels):
-            color = theme.TEXT
-            if value.startswith("+"):
-                color = theme.SUCCESS
-            elif value.startswith("-"):
-                color = theme.ERROR
+            color = theme.SUCCESS if value.startswith("+") else theme.ERROR if value.startswith("-") else theme.TEXT
             vl.configure(text=value, text_color=color)
             cl.configure(text=caption)
-        if peak and current:
-            self.tile_labels[0][1].configure(text=f"current {tclass.lower()} rating (peak {peak})")
 
-        # blunders per analyzed game, weekly average
-        per_game = {r["game_id"]: (r["played_at"], r["n"]) for r in self.conn.execute(
-            """SELECT e.game_id, g.played_at, g.time_control,
-                      SUM(e.cp_after IS NOT NULL AND e.cp_before - e.cp_after >= 300) AS n
-               FROM move_evaluations e JOIN games g ON g.id = e.game_id
-               GROUP BY e.game_id""") if time_class(r["time_control"]) == tclass}
-        blunder_weeks = OrderedDict()
-        for played_at, n in sorted(per_game.values()):
-            week = self._week(dt.datetime.fromisoformat(played_at).date())
-            blunder_weeks.setdefault(week, []).append(n)
-        points = [(w.strftime("%b %d"), sum(v) / len(v)) for w, v in list(blunder_weeks.items())[-30:]]
-        charts.line_chart(self.blunder_chart, points, color=theme.ERROR, value_fmt="{:.1f}",
-                          empty_text="Analyze more games to see this")
-
-        charts.bar_chart(self.puzzle_chart,
-                         [(dt.date.fromisoformat(w).strftime("%b %d"), a, c) for w, a, c in puzzle_weeks[-12:]],
+        charts.line_chart(self.blunder_chart, [(label(w), v) for w, v in data["blunders_per_game_weekly"]],
+                          color=theme.ERROR, value_fmt="{:.1f}", empty_text="Analyze more games to see this")
+        charts.bar_chart(self.puzzle_chart, [(label(w), a, c) for w, a, c in data["puzzle_weeks"]],
                          labels=("tried", "solved"), empty_text="Solve some puzzles to see this")

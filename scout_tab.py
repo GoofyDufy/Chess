@@ -8,20 +8,13 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-from collections import defaultdict
-from typing import Dict, List, Tuple
-
-import chess
 import customtkinter as ctk
 
 import chess_com_client
+import scouting
 import theme
-from models import TIME_FILTERS, in_time_filter
-from repertoire_gaps import _opening_moves, _repertoire, format_line, position_key
-from stats import Record
+from models import TIME_FILTERS
 
-SCOUT_PLIES = 6
-MIN_GAMES = 2
 
 
 class ScoutTab(ctk.CTkFrame):
@@ -141,44 +134,16 @@ class ScoutTab(ctk.CTkFrame):
     def _render(self) -> None:
         if not self._games:
             return
-        classes = TIME_FILTERS[self.filter_var.get()]
-        games = [g for g in self._games if in_time_filter(g.time_control, classes)]
-        # Game.my_color here = the SCOUTED player's color (fetched under their name)
-        lines: Dict[Tuple[str, Tuple[str, ...]], Record] = defaultdict(Record)
-        for g in games:
-            sans = _opening_moves(g.pgn, SCOUT_PLIES)
-            board = chess.Board()
-            clean = []
-            for san in sans:
-                try:
-                    move = board.parse_san(san)
-                except ValueError:
-                    break
-                clean.append(board.san(move))
-                board.push(move)
-            if len(clean) >= SCOUT_PLIES:
-                lines[(g.my_color.value, tuple(clean))].add(g.result.value)
-
-        # your repertoire for the OPPOSITE color of theirs
-        reps = {c: _repertoire(self.conn, c)[1] for c in ("white", "black")}
+        data = scouting.scout_lines(self.conn, self._games, TIME_FILTERS[self.filter_var.get()])
         for their_color, tree in (("white", self.white_tree), ("black", self.black_tree)):
             tree.delete(*tree.get_children())
-            my_color = "black" if their_color == "white" else "white"
-            my_turn = chess.WHITE if my_color == "white" else chess.BLACK
-            rows = sorted(((k[1], r) for k, r in lines.items() if k[0] == their_color and r.games >= MIN_GAMES),
-                          key=lambda kr: -kr[1].games)
-            for sans, rec in rows[:40]:
-                covered, board = True, chess.Board()
-                for san in sans:
-                    move = board.parse_san(san)
-                    if board.turn == my_turn and (position_key(board.fen()), move.uci()) not in reps[my_color]:
-                        covered = False
-                    board.push(move)
+            for row in data[their_color]:
                 tree.insert("", "end", values=(
-                    format_line(list(sans)), rec.games, f"{rec.wins} / {rec.draws} / {rec.losses}",
-                    f"{100 * rec.score:.0f}%", "✓ covered" if covered else "not covered",
+                    row["line"], row["games"], f"{row['wins']} / {row['draws']} / {row['losses']}",
+                    f"{100 * row['score']:.0f}%",
+                    "✓ covered" if row["covered_by_your_repertoire"] else "not covered",
                 ))
         self.status_label.configure(
-            text=f"{self._username}: {len(games)} games in this filter. Lines played at least {MIN_GAMES} times. "
-                 "'Your prep' checks your own repertoire for the other color.",
+            text=f"{self._username}: {data['games']} games in this filter. Lines played at least "
+                 f"{scouting.MIN_GAMES} times. 'Your prep' checks your own repertoire for the other color.",
             text_color=theme.TEXT_MUTED)
