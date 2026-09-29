@@ -19,6 +19,8 @@ LIGHT = BOARD_LIGHT
 DARK = BOARD_DARK
 HIGHLIGHT = BOARD_HIGHLIGHT
 ANNOTATION_COLOR = "#E0892B"   # orange, reads on both square colors
+GAME_MOVE_COLOR = "#2F76D2"    # blue: the move you played in the game
+REPLY_COLOR = "#2E9B4F"        # green: the computer's best reply
 
 # Same unicode glyph is used for both colors — we recolor it ourselves
 # below rather than relying on the font's built-in hollow/solid styling,
@@ -49,6 +51,9 @@ class ChessBoardWidget(tk.Canvas):
         # chess.com-style annotations: right-drag = arrow, right-click a
         # square = circle, any left click clears them
         self.arrows: set[tuple[int, int]] = set()
+        # app-placed arrows (from, to, color) - e.g. your game move in blue;
+        # kept through clicks, cleared when a new position is loaded
+        self.marked_arrows: list[tuple[int, int, str]] = []
         self.circles: set[int] = set()
         self._right_press_square: Optional[int] = None
         self.bind("<Button-1>", self._handle_click)
@@ -62,6 +67,7 @@ class ChessBoardWidget(tk.Canvas):
         if flipped is not None:
             self.flipped = flipped
         self.arrows.clear()
+        self.marked_arrows = []
         self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
@@ -75,6 +81,7 @@ class ChessBoardWidget(tk.Canvas):
         if flipped is not None:
             self.flipped = flipped
         self.arrows.clear()
+        self.marked_arrows = []
         self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
@@ -85,6 +92,7 @@ class ChessBoardWidget(tk.Canvas):
         self.selected_square = None
         self.legal_targets = set()
         self.arrows.clear()
+        self.marked_arrows = []
         self.circles.clear()
         self.delete("all")
 
@@ -122,16 +130,26 @@ class ChessBoardWidget(tk.Canvas):
             self.arrows ^= {(start, end)}    # same arrow again removes it
         self.redraw()
 
+    def set_marked_arrows(self, arrows) -> None:
+        """Replace the app-placed arrows: [(from_square, to_square, color)]."""
+        self.marked_arrows = list(arrows)
+        self.redraw()
+
+    def _draw_arrow(self, start: int, end: int, color: str, width: int = 11) -> None:
+        x0, y0 = self._square_center(start)
+        x1, y1 = self._square_center(end)
+        self.create_line(x0, y0, x1, y1, fill=color, width=width,
+                         arrow="last", arrowshape=(22, 26, 10), capstyle="round")
+
     def _draw_annotations(self) -> None:
+        for start, end, color in self.marked_arrows:
+            self._draw_arrow(start, end, color)
         r = SQUARE_SIZE / 2 - 3
         for square in self.circles:
             cx, cy = self._square_center(square)
             self.create_oval(cx - r, cy - r, cx + r, cy + r, outline=ANNOTATION_COLOR, width=4)
         for start, end in self.arrows:
-            x0, y0 = self._square_center(start)
-            x1, y1 = self._square_center(end)
-            self.create_line(x0, y0, x1, y1, fill=ANNOTATION_COLOR, width=11,
-                             arrow="last", arrowshape=(22, 26, 10), capstyle="round")
+            self._draw_arrow(start, end, ANNOTATION_COLOR)
 
     def redraw(self) -> None:
         self.delete("all")

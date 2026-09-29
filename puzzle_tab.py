@@ -28,7 +28,7 @@ import stats
 import style
 import theme
 from play_window import PlayWindow
-from board_widget import BOARD_PIXELS, ChessBoardWidget
+from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
 from models import TIME_FILTERS, Game, Puzzle
 
 TYPE_COLORS = {
@@ -409,6 +409,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
         self.game_label.configure(text=self._game_label_text())
         self._show_prompt()
+        self._show_game_move()
 
         self.queue_listbox.selection_clear(0, tk.END)
         self.queue_listbox.selection_set(index)
@@ -452,6 +453,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.solved_ids.add(self.current_puzzle.id)
             self._refresh_listbox_row(self.queue_index)
             self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
+            self.board_widget.set_marked_arrows([])
             self.explanation_label.configure(text=self._explanation_text(correct=True))
             self._explain_solution_async()
         else:
@@ -463,7 +465,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self._show_retry_buttons()
             fen = self.current_puzzle.fen
             self.explanation_label.configure(text="Working out why…")
-            self._explain_async(lambda engine: explain.explain_attempt(fen, move, engine))
+            self.board_widget.set_marked_arrows([])
+            self._explain_async(lambda engine: self._attempt_job(fen, move, engine))
 
     # ---------- move explanations (Stockfish lines + board facts) ----------
 
@@ -503,11 +506,41 @@ class PuzzleReviewTab(ctk.CTkFrame):
                         pass
 
             def apply():
-                if self._explain_token is token and text:
+                if self._explain_token is not token or not text:
+                    return
+                if isinstance(text, tuple):          # (explanation, arrows to draw)
+                    words, arrows = text
+                    self.explanation_label.configure(text=words)
+                    if self.attempt_state == "wrong":
+                        self.board_widget.set_marked_arrows(arrows)
+                else:
                     self.explanation_label.configure(text=text)
             self._ui_queue.put(apply)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _attempt_job(self, fen: str, move: chess.Move, engine):
+        """Explanation of a wrong try + the computer's reply as a green arrow."""
+        text, line = explain.explain_attempt(fen, move, engine, with_line=True)
+        arrows = [(line[0].from_square, line[0].to_square, REPLY_COLOR)] if line else []
+        if line:
+            board = chess.Board(fen)
+            board.push(move)
+            text += f"\nGreen arrow: the computer's reply {board.san(line[0])}."
+        return text, arrows
+
+    def _show_game_move(self) -> None:
+        """Blue arrow + note for the move you actually played in the game."""
+        p = self.current_puzzle
+        if p is None or not p.played_move_san:
+            return
+        try:
+            move = chess.Board(p.fen).parse_san(p.played_move_san)
+        except ValueError:
+            return
+        self.board_widget.set_marked_arrows([(move.from_square, move.to_square, GAME_MOVE_COLOR)])
+        self.explanation_label.configure(
+            text=f"In your game you played {p.played_move_san} (blue arrow). Find something better.")
 
     def _eval_summary(self) -> str:
         p = self.current_puzzle
@@ -539,6 +572,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self._show_prompt()
+        self._show_game_move()
 
     def _on_reveal(self) -> None:
         if self.current_puzzle is None:

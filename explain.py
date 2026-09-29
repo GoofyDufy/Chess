@@ -206,7 +206,7 @@ def _mate_for(score: Optional[chess.engine.PovScore], color: chess.Color) -> Opt
 
 # ---------- public ----------
 
-def explain_attempt(fen: str, attempt: chess.Move, engine=None) -> str:
+def explain_attempt(fen: str, attempt: chess.Move, engine=None, with_line: bool = False):
     """Why a wrong try fails — WITHOUT naming the best move, so the puzzle
     can still be retried."""
     before = chess.Board(fen)
@@ -240,7 +240,10 @@ def explain_attempt(fen: str, attempt: chess.Move, engine=None) -> str:
         sentences.append(f"Also, {extra[0]}.")
     if not sentences:
         sentences.append(f"{san} lets {opp} off the hook — look for a more forcing move.")
-    return " ".join(sentences[:3])
+    text = " ".join(sentences[:3])
+    # with_line: also return the engine's refutation (list of moves from the
+    # position after the attempt), so the board can draw the reply
+    return (text, pv) if with_line else text
 
 
 def explain_solution(fen: str, best: chess.Move, game_move: Optional[chess.Move], engine=None) -> str:
