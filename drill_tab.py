@@ -56,6 +56,8 @@ class OpeningDrillTab(ctk.CTkFrame):
 
         button_row = ctk.CTkFrame(board_pad, fg_color="transparent")
         button_row.pack(pady=(10, 0), anchor="w")
+        self.line_toggle = theme.button(button_row, "Show full line", self._toggle_full_line, width=130)
+        self._show_full_line = False
         self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
         self.reveal_button = theme.button(button_row, "Show correct move", self._on_reveal, width=160)
         self.play_button = theme.button(button_row, "Play it out vs Stockfish", self._play_it_out,
@@ -105,6 +107,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.variation_listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
         variation_scroll.pack(side="left", fill="y", pady=8)
         self.variation_listbox.bind("<Double-Button-1>", lambda e: self._start_drill())
+        self.preview_label = theme.label(drill, "", "muted", wraplength=340)
+        self.preview_label.pack(anchor="w", fill="x", pady=(6, 0))
         self._variation_roots = []
 
         self.start_button = theme.button(drill, "Start drill", self._start_drill, "primary")
@@ -143,6 +147,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         if selection is None:
             return
         _, root, _ = self._selected_entry()
+        self.preview_label.configure(text=self._line_preview(root))
         self._render_plans(root.line_name if root else None, selection[0], PlayerColor(selection[1]))
 
     def _render_plans(self, line_name: Optional[str], repertoire_name: str, my_color: PlayerColor) -> None:
@@ -178,8 +183,51 @@ class OpeningDrillTab(ctk.CTkFrame):
         section("WATCH OUT FOR")
         bullets(notes.watch_out)
 
+    def _update_line_label(self) -> None:
+        """Moves played so far in notation, or the whole line when 'Show full
+        line' is on (hidden by default so it doesn't give answers away)."""
+        if self.session is None or self.session.is_finished():
+            return   # the end-of-line recap owns the label then
+        if self._show_full_line:
+            full = format_move_list(self.session.full_line_san())
+            self.recap_label.configure(text=f"Full line: {full}")
+        else:
+            board = chess.Board()
+            played = []
+            for move in self.session.board.move_stack:
+                played.append(board.san(move))
+                board.push(move)
+            self.recap_label.configure(text=f"Moves: {format_move_list(played)}" if played else "")
+
+    def _toggle_full_line(self) -> None:
+        self._show_full_line = not self._show_full_line
+        self.line_toggle.configure(text="Hide full line" if self._show_full_line else "Show full line")
+        self._update_line_label()
+
+    def _line_preview(self, root) -> str:
+        """Notation for a variation in the Setup list: its first branch at
+        each step, noting how many alternative branches it has."""
+        if root is None:
+            return ""
+        path, node, branches = [root], root, 0
+        while True:
+            children = db.children_of(self.conn, node.id)
+            if not children:
+                break
+            branches += len(children) - 1
+            node = children[0]
+            path.append(node)
+        board, sans = chess.Board(), []
+        for n in path:
+            move = chess.Move.from_uci(n.move_uci)
+            sans.append(board.san(move))
+            board.push(move)
+        extra = f"  (+{branches} alternative branch{'es' if branches != 1 else ''})" if branches else ""
+        return format_move_list(sans) + extra
+
     def _show_move_note(self, san: Optional[str]) -> None:
         """The imported PGN's comment on the move just played, if any."""
+        self._update_line_label()
         note = self.session.last_move_note() if self.session else None
         # moves without a comment leave the previous note up (it's prefixed
         # with its move), so a quick opponent reply doesn't wipe your move's note
@@ -480,6 +528,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         self._line_missed = False
         self.play_button.pack_forget()
         self.recap_label.configure(text="")
+        self._show_full_line = False
+        self.line_toggle.configure(text="Show full line")
+        self.line_toggle.pack(side="left", padx=(0, 8))
         self.move_note_label.configure(text="")
         self._render_plans(self.session.line_name, name, my_color)
         self.right_switch.set("Plans")
@@ -491,6 +542,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.line_name_label.configure(text=f"Drilling: {self.session.line_name}")
         # show the board from your side when drilling Black
         self.board_widget.show_board(self.session.board, flipped=my_color == PlayerColor.BLACK)
+        self._update_line_label()
         self._advance()
 
     def _advance(self) -> None:
@@ -520,6 +572,7 @@ class OpeningDrillTab(ctk.CTkFrame):
                                  text_color=theme.SUCCESS)
         self.recap_label.configure(text=f"{self.session.line_name}:\n{recap}")
         self._hide_retry_buttons()
+        self.line_toggle.pack_forget()
         # one attempt per line: clean run = correct (clears it from Weak lines over time)
         db.record_attempt(self.conn, "line", self.session.target_path[0].id, not self._line_missed)
         self.play_button.pack(side="left")
