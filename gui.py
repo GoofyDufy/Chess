@@ -1,5 +1,5 @@
 """
-Desktop GUI for the chess prep app. Three screens, picked from a sidebar:
+Desktop GUI for the King Coach app. Three screens, picked from a sidebar:
 
   1. Puzzle Review — import your chess.com games, analyze them with
      Stockfish (results cached per game), and drill the mistakes it finds.
@@ -38,7 +38,7 @@ SIDEBAR_WIDTH = 200
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Chess Prep")
+        self.title("King Coach")
         theme.apply_theme(self)
 
         # tall enough for the board card (board + status + buttons) without
@@ -60,7 +60,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(brand, text="♞", width=34, height=34, corner_radius=10,
                      fg_color=theme.ACCENT, text_color=theme.ACCENT_TEXT,
                      font=(theme.FONT_FAMILY, 20)).pack(side="left")
-        theme.label(brand, "Chess Prep", "heading").pack(side="left", padx=(10, 0))
+        theme.label(brand, "King Coach", "heading").pack(side="left", padx=(10, 0))
 
         # ---- player switcher (bottom of the sidebar) ----
         player_card = theme.card(sidebar, fg_color=theme.PANEL_BG)
@@ -95,7 +95,7 @@ class App(ctk.CTk):
 
         profiles.set_current(name)
         self.player_var.set(name)
-        self.title(f"Chess Prep — {name}")
+        self.title(f"King Coach — {name}")
         self.conn = db.get_connection(profiles.db_path(name))
         self._build_pages()
 

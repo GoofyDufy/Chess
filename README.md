@@ -1,4 +1,4 @@
-# Chess Prep — desktop prototype
+# King Coach — desktop prototype
 
 ## Setup
 
@@ -95,9 +95,9 @@ python -m unittest discover tests
 powershell -ExecutionPolicy Bypass -File build_exe.ps1
 ```
 
-Builds `dist\ChessPrep\` (Stockfish and fonts bundled if a `stockfish\`
+Builds `dist\KingCoach\` (Stockfish and fonts bundled if a `stockfish\`
 folder exists). Zip that folder to share it; each player's data is stored
-in `chessprep.db` next to `ChessPrep.exe`.
+in `chessprep.db` next to `KingCoach.exe`.
 
 ## Not yet built (left for later)
 

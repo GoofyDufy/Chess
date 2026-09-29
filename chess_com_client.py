@@ -10,7 +10,7 @@ import requests
 from models import Game, GameResult, PlayerColor
 
 BASE_URL = "https://api.chess.com/pub"
-HEADERS = {"User-Agent": "chessprep-desktop/0.1 (personal use)"}
+HEADERS = {"User-Agent": "kingcoach-desktop/0.1 (personal use)"}
 
 
 def get_archive_urls(username: str) -> List[str]:

@@ -1,7 +1,7 @@
-# Builds a standalone Windows app in dist\ChessPrep\ (no Python needed to run it).
+# Builds a standalone Windows app in dist\KingCoach\ (no Python needed to run it).
 #   powershell -ExecutionPolicy Bypass -File build_exe.ps1
-# Zip the whole dist\ChessPrep folder to share it. The player's own data
-# (chessprep.db) is created next to ChessPrep.exe on first run.
+# Zip the whole dist\KingCoach folder to share it. The player's own data
+# (chessprep.db) is created next to KingCoach.exe on first run.
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -16,10 +16,10 @@ if (Test-Path stockfish) {
     Write-Warning "No stockfish\ folder found - the app will ask users to add Stockfish themselves."
 }
 
-python -m PyInstaller --noconfirm --clean --windowed --name ChessPrep `
+python -m PyInstaller --noconfirm --clean --windowed --name KingCoach `
     --collect-data customtkinter @addData gui.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 # opening files next to the .exe, where Import PGN file... can find them
-Copy-Item *.pgn dist\ChessPrep\ -Force
-Write-Host "Built dist\ChessPrep\ChessPrep.exe"
+Copy-Item *.pgn dist\KingCoach\ -Force
+Write-Host "Built dist\KingCoach\KingCoach.exe"
