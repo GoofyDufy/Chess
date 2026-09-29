@@ -20,7 +20,10 @@ import chess
 import analyzer
 import chess_com_client
 import db
+import chess.engine
+
 import engine_locator
+import explain
 import stats
 import theme
 from play_window import PlayWindow
@@ -367,6 +370,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.queue_index = index
         self.current_puzzle = self.queue[index]
         self._attempt_recorded = False
+        self._explain_token = None
         self.current_game = (
             db.get_game(self.conn, self.current_puzzle.source_game_id)
             if self.current_puzzle.source_game_id else None
@@ -420,6 +424,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self._refresh_listbox_row(self.queue_index)
             self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
             self.explanation_label.configure(text=self._explanation_text(correct=True))
+            self._explain_solution_async()
         else:
             self.attempt_state = "wrong"
             self.status_label.configure(
@@ -427,6 +432,60 @@ class PuzzleReviewTab(ctk.CTkFrame):
                 text_color=theme.ERROR,
             )
             self._show_retry_buttons()
+            fen = self.current_puzzle.fen
+            self.explanation_label.configure(text="Working out why…")
+            self._explain_async(lambda engine: explain.explain_attempt(fen, move, engine))
+
+    # ---------- move explanations (Stockfish lines + board facts) ----------
+
+    def _explain_solution_async(self) -> None:
+        p = self.current_puzzle
+        best = chess.Move.from_uci(p.correct_move_uci)
+        try:
+            game_move = chess.Board(p.fen).parse_san(p.played_move_san) if p.played_move_san else None
+        except ValueError:
+            game_move = None
+        summary = self._eval_summary()
+        self.explanation_label.configure(text="Working out the key line…")
+        self._explain_async(lambda engine: explain.explain_solution(p.fen, best, game_move, engine)
+                            + (f"\n{summary}" if summary else ""))
+
+    def _explain_async(self, job) -> None:
+        """Runs job(engine) on a background thread with a short-lived
+        Stockfish (None if not installed) and shows the text when done —
+        unless the user has moved on to another puzzle or retried."""
+        token = object()
+        self._explain_token = token
+
+        def worker():
+            engine = None
+            try:
+                path = engine_locator.find_stockfish()
+                if path:
+                    engine = chess.engine.SimpleEngine.popen_uci(path)
+                text = job(engine)
+            except Exception:
+                text = None
+            finally:
+                if engine is not None:
+                    try:
+                        engine.quit()
+                    except Exception:
+                        pass
+
+            def apply():
+                if self._explain_token is token and text:
+                    self.explanation_label.configure(text=text)
+            self._ui_queue.put(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _eval_summary(self) -> str:
+        p = self.current_puzzle
+        if p.eval_before_cp is None:
+            return ""
+        return (f"Evaluation: {_cp_to_pawns(p.eval_before_cp)} with the best move, "
+                f"{_cp_to_pawns(p.eval_after_cp)} after {p.played_move_san} in your game.")
 
     def _play_it_out(self) -> None:
         """Play the puzzle position against Stockfish — for endgames this
@@ -446,6 +505,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
         if self.current_puzzle is None:
             return
         self.attempt_state = "solving"
+        self._explain_token = None
+        self.explanation_label.configure(text="")
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self._show_prompt()
@@ -465,6 +526,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
         )
         self.explanation_label.configure(text=self._explanation_text(correct=False))
+        self._explain_solution_async()
 
     def _show_retry_buttons(self) -> None:
         self.retry_button.pack(side="left", padx=(8, 0))
