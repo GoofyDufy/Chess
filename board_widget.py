@@ -7,11 +7,10 @@ from typing import Optional
 
 import chess
 
+from piece_shapes import draw_piece
 from theme import (
     BOARD_DARK, BOARD_HIGHLIGHT, BOARD_LIGHT, LAST_MOVE_DARK, LAST_MOVE_LIGHT,
-    PANEL_BG, PIECE_BLACK_FILL, PIECE_BLACK_OUTLINE, PIECE_WHITE_FILL,
-    PIECE_WHITE_OUTLINE,
-)
+    PANEL_BG, )
 
 SQUARE_SIZE = 64
 BOARD_PIXELS = SQUARE_SIZE * 8
@@ -20,13 +19,6 @@ DARK = BOARD_DARK
 HIGHLIGHT = BOARD_HIGHLIGHT
 ANNOTATION_COLOR = "#E0892B"   # orange, reads on both square colors
 
-# Same unicode glyph is used for both colors — we recolor it ourselves
-# below rather than relying on the font's built-in hollow/solid styling,
-# so pieces read as "cream" vs "dark brown" like the rest of the theme.
-UNICODE_PIECES = {
-    "P": "\u265F", "N": "\u265E", "B": "\u265D", "R": "\u265C", "Q": "\u265B", "K": "\u265A",
-    "p": "\u265F", "n": "\u265E", "b": "\u265D", "r": "\u265C", "q": "\u265B", "k": "\u265A",
-}
 
 
 class ChessBoardWidget(tk.Canvas):
@@ -170,20 +162,7 @@ class ChessBoardWidget(tk.Canvas):
 
                 piece = self.board.piece_at(square)
                 if piece:
-                    symbol = UNICODE_PIECES[piece.symbol()]
-                    cx, cy = x0 + SQUARE_SIZE / 2, y0 + SQUARE_SIZE / 2
-                    if piece.color == chess.WHITE:
-                        fill, outline = PIECE_WHITE_FILL, PIECE_WHITE_OUTLINE
-                    else:
-                        fill, outline = PIECE_BLACK_FILL, PIECE_BLACK_OUTLINE
-                    font = ("Arial", 38)
-                    # poor-man's text outline: draw the glyph offset in
-                    # every direction in the outline color first, then
-                    # draw it again centered in the fill color on top —
-                    # gives pieces a readable edge against either square
-                    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)):
-                        self.create_text(cx + dx, cy + dy, text=symbol, font=font, fill=outline)
-                    self.create_text(cx, cy, text=symbol, font=font, fill=fill)
+                    draw_piece(self, piece, x0, y0, SQUARE_SIZE)
 
                 # legal-move indicator: a dot for empty squares, a ring
                 # around the piece for captures — this is the main fix for
