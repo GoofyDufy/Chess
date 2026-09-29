@@ -42,12 +42,12 @@ BOARD_HIGHLIGHT = "#AFA23A"   # olive, for the selected square
 LAST_MOVE_LIGHT = "#F3E27C"
 LAST_MOVE_DARK = "#CDB04F"
 
-# piece colors: the "Cool slate" set (see piece_shapes.py) - light slate
-# pieces with a navy outline, navy pieces with a near-black outline
-PIECE_WHITE_FILL = "#EEF3F8"
-PIECE_WHITE_OUTLINE = "#2C3E55"
-PIECE_BLACK_FILL = "#2C3E55"
-PIECE_BLACK_OUTLINE = "#0E1622"
+# piece fill colors — cream for white pieces, dark brown for black, each
+# with a contrasting outline so they read clearly against either square
+PIECE_WHITE_FILL = "#FDF6EC"
+PIECE_WHITE_OUTLINE = "#3B2314"
+PIECE_BLACK_FILL = "#3B2314"
+PIECE_BLACK_OUTLINE = "#1C1108"
 
 def _load_bundled_fonts() -> bool:
     """Manrope (body) + Fraunces (headings), the mockup's typefaces, are
