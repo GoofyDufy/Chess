@@ -5,6 +5,7 @@ Recomputed every time the tab is shown (cheap: no engine involved)."""
 from __future__ import annotations
 
 import tkinter as tk
+from typing import List, Optional
 from tkinter import ttk
 
 import customtkinter as ctk
@@ -23,6 +24,7 @@ from models import TIME_FILTERS as FILTERS, PlayerColor
 
 MIN_OPENING_GAMES = 3
 REPERTOIRE_FROM_GAMES = "From my games"
+ALL_FIRST_MOVES = "All first moves"
 BAR_WIDTH = 12
 
 
@@ -166,8 +168,16 @@ class StatsTab(ctk.CTkFrame):
     # ---------- Repertoire page: what you face vs what you've prepared ----------
 
     def _build_repertoire_page(self, page) -> None:
-        self.rep_note_label = theme.label(page, "", "muted", wraplength=900)
-        self.rep_note_label.pack(anchor="w", fill="x", pady=(0, 8))
+        note_row = ctk.CTkFrame(page, fg_color="transparent")
+        note_row.pack(fill="x", pady=(0, 8))
+        self.first_move_var = tk.StringVar(value=ALL_FIRST_MOVES)
+        self.first_move_menu = theme.option_menu(note_row, [ALL_FIRST_MOVES], self.first_move_var,
+                                                 lambda _: self._render_repertoire(), width=180)
+        self.first_move_menu.pack(side="right")
+        theme.label(note_row, "First move", "muted").pack(side="right", padx=(0, 8))
+        self.rep_note_label = theme.label(note_row, "", "muted", wraplength=640)
+        self.rep_note_label.pack(side="left", fill="x", expand=True)
+        self._rep_report = None
         grid = ctk.CTkFrame(page, fg_color="transparent")
         grid.pack(fill="both", expand=True)
         grid.columnconfigure(0, weight=1)
@@ -199,6 +209,36 @@ class StatsTab(ctk.CTkFrame):
             r = repertoire_gaps.compute(self.conn, FILTERS[self.filter_var.get()])
         finally:
             self.configure(cursor="")
+        self._rep_report = r
+
+        # first-move filter: the moves that actually start your games, most common first
+        counts = r.first_moves
+        options = [ALL_FIRST_MOVES] + [f"1.{san}  ({n})" for san, n in
+                                       sorted(counts.items(), key=lambda kv: -kv[1])]
+        self.first_move_menu.configure(values=options)
+        current = self._selected_first_move()
+        if current and current not in counts:
+            self.first_move_var.set(ALL_FIRST_MOVES)
+        elif current:
+            self.first_move_var.set(next(o for o in options if o.startswith(f"1.{current} ")))
+        self._render_repertoire()
+
+    def _selected_first_move(self) -> Optional[str]:
+        """'1.e4  (1210)' -> 'e4'; None for all first moves."""
+        value = self.first_move_var.get()
+        if value == ALL_FIRST_MOVES or not value.startswith("1."):
+            return None
+        return value[2:].split()[0]
+
+    def _render_repertoire(self) -> None:
+        r = self._rep_report
+        if r is None:
+            return
+        first = self._selected_first_move()
+
+        def starts_with(sans: List[str]) -> bool:
+            return first is None or (bool(sans) and sans[0] == first)
+
         for tree in (self.gaps_tree, self.common_tree):
             tree.delete(*tree.get_children())
         self._rep_items = {}
@@ -210,7 +250,8 @@ class StatsTab(ctk.CTkFrame):
                      "appear under Lines you face most — add the most common ones from there.")
         self.rep_note_label.configure(text=note)
 
-        for i, g in enumerate(gp for gp in r.gaps if r.has_repertoire[gp.color]):
+        gaps = [g for g in r.gaps if r.has_repertoire[g.color] and starts_with(g.prefix + [g.move])]
+        for i, g in enumerate(gaps):
             iid = f"gap{i}"
             self._rep_items[iid] = g
             reply = f"{g.suggestion} ({g.suggestion_source})" if g.suggestion else (
@@ -219,7 +260,8 @@ class StatsTab(ctk.CTkFrame):
                 g.line, g.color.capitalize(), g.who, g.record.games,
                 f"{100 * g.record.score:.0f}%", reply,
             ))
-        for i, c in enumerate(r.common[:60]):
+        common = [c for c in r.common if starts_with(c.sans)][:60]
+        for i, c in enumerate(common):
             iid = f"common{i}"
             self._rep_items[iid] = c
             self.common_tree.insert("", "end", iid=iid, values=(

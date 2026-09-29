@@ -110,6 +110,7 @@ class GapReport:
     gaps: List[Gap] = field(default_factory=list)
     common: List[CommonLine] = field(default_factory=list)
     has_repertoire: Dict[str, bool] = field(default_factory=dict)
+    first_moves: Dict[str, int] = field(default_factory=dict)   # SAN of move 1 -> games
 
 
 def _repertoire(conn: sqlite3.Connection, color: str) -> Tuple[Set[str], Set[Tuple[str, str]]]:
@@ -174,6 +175,8 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
             if gap_key is not None and len(sans) >= max(COMMON_PLIES, len(gaps[gap_key].prefix) + 2):
                 break   # past the gap and your reply to it; nothing more to learn
 
+        if sans:
+            report.first_moves[sans[0]] = report.first_moves.get(sans[0], 0) + 1
         if len(sans) >= COMMON_PLIES:
             ckey = (color, tuple(sans[:COMMON_PLIES]))
             if ckey not in common:
