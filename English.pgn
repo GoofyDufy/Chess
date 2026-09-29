@@ -1,0 +1,19 @@
+[Event "English - Reversed Sicilian (Four Knights, g3)"]
+
+1. c4 {Controls d5 from the side - the English.} e5 {The most common reply: a Sicilian with colors reversed, and White has an extra tempo.} 2. Nc3 {Adds a second attacker on d5.} Nf6 3. Nf3 Nc6 4. g3 {The fianchetto: the bishop will rule the long diagonal.} d5 5. cxd5 Nxd5 6. Bg2 {Now the bishop hits the d5 knight and the queenside.} Nb6 7. O-O Be7 8. d3 O-O 9. a3 {Prepares b4 - queenside expansion is White's main plan.} *
+
+[Event "English - Symmetrical (1...c5)"]
+
+1. c4 c5 {Black copies White - the Symmetrical English.} 2. Nf3 Nf6 3. Nc3 Nc6 4. g3 g6 5. Bg2 Bg7 {Both sides fianchetto.} 6. O-O O-O 7. d4 {White breaks the symmetry first and opens the center.} cxd4 8. Nxd4 Nxd4 9. Qxd4 d6 10. Qd3 {The queen steps off the long diagonal; White has more space and pressure on the d-file.} *
+
+[Event "English - Anglo-Indian (1...Nf6, ...e6, ...b6)"]
+
+1. c4 Nf6 2. Nf3 e6 3. g3 b6 {A Queen's Indian-style setup: Black fights for the long diagonal too.} 4. Bg2 Bb7 {The two fianchettoed bishops face each other.} 5. O-O Be7 6. Nc3 O-O 7. Re1 {Prepares e4 to gain central space.} d5 {Black stops e4 directly.} 8. cxd5 exd5 9. d4 {A solid center; White plays against Black's hanging pawns or the d5 pawn.} *
+
+[Event "English - vs King's Indian setup (Botvinnik)"]
+
+1. c4 Nf6 2. Nc3 g6 {Black aims for a King's Indian setup.} 3. g3 Bg7 4. Bg2 O-O 5. e4 {The Botvinnik System: pawns on c4 and e4 clamp the d5 square.} d6 6. Nge2 {The knight goes to e2 so the f-pawn stays free for f4.} e5 7. O-O c6 8. d3 {Solid setup; plans are f4 on the kingside or b4 on the queenside.} *
+
+[Event "English - Agincourt (1...e6, ...d5)"]
+
+1. c4 e6 2. Nf3 d5 {Black builds a Queen's Gambit Declined-style center.} 3. g3 {White doesn't play d4 - the g2 bishop pressures d5 instead (like a Catalan).} Nf6 4. Bg2 Be7 5. O-O O-O 6. b3 {Double fianchetto: both bishops aim at the center from a distance.} c5 7. Bb2 Nc6 8. e3 b6 9. Nc3 {Flexible development; White waits for the right moment for d4 or cxd5.} *
