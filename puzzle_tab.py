@@ -101,6 +101,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._stop_event = threading.Event()
         self._busy = False
 
+        self.import_page = ctk.CTkFrame(master, fg_color="transparent")
         self._build_layout()
         self._refresh_game_summary()
         self._reload_queue()
@@ -159,8 +160,12 @@ class PuzzleReviewTab(ctk.CTkFrame):
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
 
         # ---- Games card ----
-        games_card = theme.card(right)
-        games_card.pack(fill="x")
+        theme.label(self.import_page, "Import & Analyze", "title").pack(anchor="w", padx=24, pady=(20, 4))
+        theme.label(self.import_page, "Download games from chess.com, then let Stockfish find your "
+                                      "mistakes. They become puzzles in Puzzle Review.", "muted").pack(
+            anchor="w", padx=24, pady=(0, 12))
+        games_card = theme.card(self.import_page)
+        games_card.pack(anchor="nw", padx=24)
         games = ctk.CTkFrame(games_card, fg_color="transparent")
         games.pack(fill="x", padx=18, pady=16)
 
@@ -225,7 +230,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         # ---- Puzzle queue card ----
         queue_card = theme.card(right)
-        queue_card.pack(fill="both", expand=True, pady=(16, 0))
+        queue_card.pack(fill="both", expand=True)
         queue_box = ctk.CTkFrame(queue_card, fg_color="transparent")
         queue_box.pack(fill="both", expand=True, padx=18, pady=16)
 
@@ -244,6 +249,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.position_var = tk.StringVar(value=ALL_POSITIONS)
         theme.option_menu(position_row, [ALL_POSITIONS, SHARP_ONLY, QUIET_ONLY], self.position_var,
                           lambda _: self._reload_queue(), width=230).pack(side="right")
+
+        # the same Focus setting as on Import & Analyze (shared variable = always in sync)
+        focus_row = ctk.CTkFrame(queue_box, fg_color="transparent")
+        focus_row.pack(fill="x", pady=(0, 8))
+        theme.label(focus_row, "Games", "muted").pack(side="left")
+        theme.option_menu(focus_row, list(TIME_FILTERS), self.focus_var,
+                          lambda _: self._on_focus_changed(), width=230).pack(side="right")
 
         # packed before the list (at the bottom) so it's never clipped
         self.queue_count_label = theme.label(queue_box, "", "muted")

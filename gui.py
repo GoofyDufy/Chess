@@ -131,6 +131,7 @@ class App(ctk.CTk):
         # prefill their username so Import only needs a click
         db.set_setting(self.conn, "chess_com_username", name)
         if messagebox.askyesno("New player", f"Import {name}'s games from chess.com now?", parent=self):
+            self.show_page("Import & Analyze")
             self.pages["Puzzle Review"]._import_games()
 
     def _build_pages(self) -> None:
@@ -156,7 +157,8 @@ class App(ctk.CTk):
         progress_tab = ProgressTab(content, self.conn)
         scout_tab = ScoutTab(content, self.conn)
 
-        for name, page in (("Puzzle Review", puzzle_tab), ("Game Review", review_tab),
+        for name, page in (("Import & Analyze", puzzle_tab.import_page),
+                           ("Puzzle Review", puzzle_tab), ("Game Review", review_tab),
                            ("Opening Drill", drill_tab), ("Stats", stats_tab),
                            ("Progress", progress_tab), ("Opponent Prep", scout_tab)):
             self.pages[name] = page
