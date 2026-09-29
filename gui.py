@@ -151,7 +151,8 @@ class App(ctk.CTk):
             drill_tab.drill_suggestion(opening.name, opening.color, opening.moves)
 
         stats_tab = StatsTab(content, self.conn, on_drill=drill_opening,
-                             on_repertoire_changed=drill_tab._refresh_repertoire_list)
+                             on_repertoire_changed=drill_tab._refresh_repertoire_list,
+                             on_review_game=review_game)
         progress_tab = ProgressTab(content, self.conn)
         scout_tab = ScoutTab(content, self.conn)
 

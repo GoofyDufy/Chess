@@ -20,7 +20,9 @@ import stats
 import style
 import theme
 
-from models import TIME_FILTERS as FILTERS, PlayerColor
+import chess
+
+from models import TIME_FILTERS as FILTERS, PlayerColor, time_class
 
 MIN_OPENING_GAMES = 3
 REPERTOIRE_FROM_GAMES = "From my games"
@@ -38,13 +40,15 @@ def _pct(part: int, whole: int) -> str:
 
 
 class StatsTab(ctk.CTkFrame):
-    def __init__(self, master, conn, on_drill=None, on_repertoire_changed=None):
+    def __init__(self, master, conn, on_drill=None, on_repertoire_changed=None, on_review_game=None):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
         # on_drill(CatalogOpening): opens that opening in the Opening Drill tab
         self.on_drill = on_drill
         # called after a line is added from the Repertoire page (refreshes Opening Drill)
         self.on_repertoire_changed = on_repertoire_changed
+        # on_review_game(game_id, fen): open Game Review at that position
+        self.on_review_game = on_review_game
         self._build_layout()
         self.bind("<Map>", lambda e: self.refresh())
 
@@ -197,9 +201,13 @@ class StatsTab(ctk.CTkFrame):
              ("games", "Games", 60), ("score", "Score", 60), ("rep", "In rep", 60)],
         )
         for tree in (self.gaps_tree, self.common_tree):
-            theme.button(tree.master.master, "Add selected to repertoire",
-                         lambda t=tree: self._add_selected_to_repertoire(t),
-                         "primary", height=34).pack(anchor="e", pady=(8, 0))
+            row = ctk.CTkFrame(tree.master.master, fg_color="transparent")
+            row.pack(fill="x", pady=(8, 0))
+            theme.button(row, "Add selected to repertoire", lambda t=tree: self._add_selected_to_repertoire(t),
+                         "primary", height=34).pack(side="right")
+            theme.button(row, "Show games", lambda t=tree: self._show_games(t), height=34).pack(
+                side="right", padx=(0, 8))
+            tree.bind("<Double-1>", lambda e, t=tree: self._show_games(t))
         self._rep_items = {}
 
     def _refresh_repertoire(self) -> None:
@@ -268,6 +276,63 @@ class StatsTab(ctk.CTkFrame):
                 repertoire_gaps.format_line(c.sans), c.opening, c.color.capitalize(),
                 c.record.games, f"{100 * c.record.score:.0f}%", "✓" if c.in_repertoire else "",
             ))
+
+    def _show_games(self, tree) -> None:
+        """Lists the games behind the selected row; double-click one to open
+        it in Game Review at the position in question."""
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo("Nothing selected", "Select a line in the table first.", parent=self)
+            return
+        item = self._rep_items[selection[0]]
+        if isinstance(item, repertoire_gaps.Gap):
+            title, fen = item.line, item.review_fen
+        else:
+            title = repertoire_gaps.format_line(item.sans)
+            board = chess.Board()
+            for san in item.sans:
+                board.push_san(san)
+            fen = board.fen()
+        marks = ",".join("?" * len(item.game_ids))
+        rows = self.conn.execute(
+            f"""SELECT id, played_at, opponent_username, result, time_control, evaluated_at
+                FROM games WHERE id IN ({marks}) ORDER BY played_at DESC""", item.game_ids).fetchall()
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Games")
+        dialog.configure(fg_color=theme.BG)
+        dialog.geometry("560x440")
+        dialog.transient(self.winfo_toplevel())
+        dialog.after(50, dialog.lift)
+        theme.label(dialog, title, "heading", wraplength=520).pack(anchor="w", padx=18, pady=(16, 2))
+        theme.label(dialog, f"{len(rows)} game(s), newest first. Double-click one to review it from this "
+                            "position.", "muted", wraplength=520).pack(anchor="w", padx=18, pady=(0, 8))
+        box = ctk.CTkFrame(dialog, fg_color=theme.PANEL_ALT, corner_radius=10)
+        box.pack(fill="both", expand=True, padx=18)
+        games_list = theme.listbox(box)
+        scroll = ctk.CTkScrollbar(box, command=games_list.yview, button_color=theme.CONTROL_BG,
+                                  fg_color=theme.PANEL_ALT)
+        games_list.configure(yscrollcommand=scroll.set)
+        games_list.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        scroll.pack(side="left", fill="y", pady=8)
+        result_colors = {"win": theme.SUCCESS, "loss": theme.ERROR}
+        for i, g in enumerate(rows):
+            note = "" if g["evaluated_at"] else "  (not analyzed yet)"
+            games_list.insert("end", f"{g['played_at'][:10]}   {g['result'].upper():<5} vs "
+                                     f"{g['opponent_username']}  · {time_class(g['time_control'])}{note}")
+            games_list.itemconfig(i, foreground=result_colors.get(g["result"], theme.TEXT))
+
+        def open_selected(event=None):
+            sel = games_list.curselection()
+            if sel and self.on_review_game:
+                self.on_review_game(rows[sel[0]]["id"], fen)
+
+        games_list.bind("<Double-1>", open_selected)
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=18, pady=12)
+        theme.button(buttons, "Close", dialog.destroy, "ghost", width=90).pack(side="right")
+        theme.button(buttons, "Open in Game Review", open_selected, "primary", width=170).pack(
+            side="right", padx=(0, 8))
 
     def _add_selected_to_repertoire(self, tree) -> None:
         selection = tree.selection()

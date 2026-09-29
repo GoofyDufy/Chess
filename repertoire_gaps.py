@@ -83,10 +83,19 @@ class Gap:
     opening: str = ""
     suggestion: Optional[str] = None       # your reply (SAN), opponent gaps only
     suggestion_source: str = ""            # "engine" / "your usual"
+    game_ids: List[str] = field(default_factory=list)   # games this happened in
 
     @property
     def line(self) -> str:
         return format_line(self.prefix + [self.move])
+
+    @property
+    def review_fen(self) -> str:
+        """The position where the game left your prep (before the gap move)."""
+        board = chess.Board()
+        for san in self.prefix:
+            board.push_san(san)
+        return board.fen()
 
     @property
     def who(self) -> str:
@@ -102,6 +111,7 @@ class CommonLine:
     record: Record = field(default_factory=Record)
     opening: str = ""
     in_repertoire: bool = False
+    game_ids: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -138,7 +148,7 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
     my_replies: Dict[str, Counter] = defaultdict(Counter)
     gap_after_keys: Dict[Tuple[str, str, str], str] = {}
 
-    for g in conn.execute("SELECT pgn, my_color, result, time_control FROM games"):
+    for g in conn.execute("SELECT id, pgn, my_color, result, time_control FROM games"):
         if not in_time_filter(g["time_control"], time_classes):
             continue
         report.games += 1
@@ -163,6 +173,7 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
                     gaps[gap_key] = Gap(color, list(sans), board.san(move), board.turn != my_turn,
                                         covered=key in positions)
                 gaps[gap_key].record.add(g["result"])
+                gaps[gap_key].game_ids.append(g["id"])
                 gap_openings[gap_key][name] += 1
             sans.append(board.san(move))
             board.push(move)
@@ -189,6 +200,7 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
                     replay.push(mv)
                 common[ckey] = CommonLine(color, list(ckey[1]), in_repertoire=in_rep)
             common[ckey].record.add(g["result"])
+            common[ckey].game_ids.append(g["id"])
             common_openings[ckey][name] += 1
 
     # engine suggestions: best move Stockfish found in that exact position
