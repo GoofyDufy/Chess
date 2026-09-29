@@ -1,4 +1,4 @@
-"""
+""""
 Desktop GUI for the King Coach app. Three screens, picked from a sidebar:
 
   1. Puzzle Review — import your chess.com games, analyze them with

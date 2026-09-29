@@ -243,7 +243,8 @@ def explain_attempt(fen: str, attempt: chess.Move, engine=None, with_line: bool 
     text = " ".join(sentences[:3])
     # with_line: also return the engine's refutation (list of moves from the
     # position after the attempt), so the board can draw the reply
-    return (text, pv) if with_line else text
+    cp_me = score.pov(me).score(mate_score=MATE_CP) if score is not None else None
+    return (text, pv, cp_me) if with_line else text
 
 
 def explain_solution(fen: str, best: chess.Move, game_move: Optional[chess.Move], engine=None) -> str:

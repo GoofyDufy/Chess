@@ -28,6 +28,7 @@ import stats
 import style
 import theme
 from play_window import PlayWindow
+from eval_bar import EvalBar
 from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
 from models import TIME_FILTERS, Game, Puzzle
 
@@ -40,6 +41,7 @@ TYPE_COLORS = {
 }
 
 WEAK_SPOTS = "Weak spots"
+NEAR_BEST_CP = 50   # a try within half a pawn of the best move is flagged as near-best
 ALL_POSITIONS = "All positions"
 SHARP_ONLY = "Sharp (one best move)"
 QUIET_ONLY = "Quiet (several good moves)"
@@ -138,8 +140,12 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.game_label = theme.label(header, "", "muted", wraplength=300)
         self.game_label.pack(side="left", fill="x")
 
-        self.board_widget = ChessBoardWidget(board_pad, self._on_move_attempt, bg=theme.PANEL_BG)
-        self.board_widget.pack()
+        board_row = ctk.CTkFrame(board_pad, fg_color="transparent")
+        board_row.pack()
+        self.eval_bar = EvalBar(board_row, BOARD_PIXELS)
+        self.eval_bar.pack(side="left", padx=(0, 8))
+        self.board_widget = ChessBoardWidget(board_row, self._on_move_attempt, bg=theme.PANEL_BG)
+        self.board_widget.pack(side="left")
 
         self.status_label = theme.label(board_pad, "", "status", wraplength=BOARD_PIXELS)
         self.status_label.pack(pady=(12, 0), anchor="w")
@@ -399,6 +405,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.queue_index = index
         self.current_puzzle = self.queue[index]
         self._attempt_recorded = False
+        self._near_best_flagged = False
         self._explain_token = None
         self.current_game = (
             db.get_game(self.conn, self.current_puzzle.source_game_id)
@@ -409,6 +416,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
         self.game_label.configure(text=self._game_label_text())
         self._show_prompt()
+        self._set_eval(self.current_puzzle.eval_before_cp)
 
         self.queue_listbox.selection_clear(0, tk.END)
         self.queue_listbox.selection_set(index)
@@ -453,14 +461,21 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self._refresh_listbox_row(self.queue_index)
             self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
             self.board_widget.set_marked_arrows(self._game_move_arrows())
+            self._set_eval(self.current_puzzle.eval_before_cp)
             self.explanation_label.configure(text=self._explanation_text(correct=True))
             self._explain_solution_async()
         else:
             self.attempt_state = "wrong"
-            self.status_label.configure(
-                text=f"Not quite — {played_san} isn't the best move here.",
-                text_color=theme.ERROR,
-            )
+            rank, cp_alt = self._engine_rank(move)
+            if rank:
+                self._flag_near_best(played_san, f"the engine's {rank} choice")
+                if cp_alt is not None:
+                    self._set_eval(cp_alt)
+            else:
+                self.status_label.configure(
+                    text=f"Not quite — {played_san} isn't the best move here.",
+                    text_color=theme.ERROR,
+                )
             self._show_retry_buttons()
             fen = self.current_puzzle.fen
             self.explanation_label.configure(text="Working out why…")
@@ -507,11 +522,17 @@ class PuzzleReviewTab(ctk.CTkFrame):
             def apply():
                 if self._explain_token is not token or not text:
                     return
-                if isinstance(text, tuple):          # (explanation, arrows to draw)
-                    words, arrows = text
+                if isinstance(text, tuple):          # (explanation, arrows, eval after your try)
+                    words, arrows, cp_after = text
                     self.explanation_label.configure(text=words)
                     if self.attempt_state == "wrong":
                         self.board_widget.set_marked_arrows(arrows)
+                        if cp_after is not None:
+                            self._set_eval(cp_after)
+                            self._maybe_flag_close(cp_after)
+                        if self._near_best_flagged:     # a good move: drop the "you miss" wording
+                            self.explanation_label.configure(
+                                text=words.replace(" — you miss something stronger here", ""))
                 else:
                     self.explanation_label.configure(text=text)
             self._ui_queue.put(apply)
@@ -520,7 +541,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
     def _attempt_job(self, fen: str, move: chess.Move, engine):
         """Explanation of a wrong try + the computer's reply as a green arrow."""
-        text, line = explain.explain_attempt(fen, move, engine, with_line=True)
+        text, line, cp_after = explain.explain_attempt(fen, move, engine, with_line=True)
         arrows = self._game_move_arrows()
         if line:
             arrows.append((line[0].from_square, line[0].to_square, REPLY_COLOR))
@@ -529,7 +550,53 @@ class PuzzleReviewTab(ctk.CTkFrame):
             text += f"\nGreen arrow: the computer's reply {board.san(line[0])}."
         if any(color == GAME_MOVE_COLOR for _, _, color in arrows):
             text += f" Blue arrow: your game move {self.current_puzzle.played_move_san}."
-        return text, arrows
+        return text, arrows, cp_after
+
+    # ---------- evaluation bar & near-best moves ----------
+
+    def _set_eval(self, cp_me: Optional[int]) -> None:
+        """Evaluation from YOUR point of view (the side to move in the puzzle)."""
+        if cp_me is None or self.current_puzzle is None:
+            self.eval_bar.set(None, flipped=self.board_widget.flipped)
+            return
+        white = chess.Board(self.current_puzzle.fen).turn == chess.WHITE
+        self.eval_bar.set(cp_me if white else -cp_me, flipped=self.board_widget.flipped)
+
+    def _engine_rank(self, move: chess.Move):
+        """('2nd' / '3rd', eval) if the try was one of the engine's saved top
+        choices for this exact position, else (None, None)."""
+        p = self.current_puzzle
+        if not p.source_game_id:
+            return None, None
+        row = self.conn.execute(
+            """SELECT second_move_uci, cp_second, third_move_uci, cp_third FROM move_evaluations
+               WHERE game_id = ? AND fen_before = ?""", (p.source_game_id, p.fen)).fetchone()
+        if row is None:
+            return None, None
+        if row["second_move_uci"] == move.uci():
+            return "2nd", row["cp_second"]
+        if row["third_move_uci"] == move.uci():
+            return "3rd", row["cp_third"]
+        return None, None
+
+    def _flag_near_best(self, san: str, what: str) -> None:
+        self._near_best_flagged = True
+        self.status_label.configure(text=f"Good find! {san} is {what}. There's one even better.",
+                                    text_color=theme.WARNING)
+
+    def _maybe_flag_close(self, cp_after: int) -> None:
+        """Live check once the engine has looked at your try: within
+        NEAR_BEST_CP of the best move counts as a near-best find (covers
+        older puzzles without saved top-3 data)."""
+        p = self.current_puzzle
+        if self._near_best_flagged or p.eval_before_cp is None:
+            return
+        gap = p.eval_before_cp - cp_after
+        if gap <= NEAR_BEST_CP:
+            board = chess.Board(p.fen)
+            attempt = self.board_widget.board.move_stack[-1] if self.board_widget.board.move_stack else None
+            san = board.san(attempt) if attempt is not None and attempt in board.legal_moves else "That"
+            self._flag_near_best(san, f"almost as good as the best move (only {max(gap, 0) / 100:.1f} worse)")
 
     def _game_move_arrows(self):
         """Blue arrow for the move you played in the game - only once you've
@@ -574,10 +641,12 @@ class PuzzleReviewTab(ctk.CTkFrame):
             return
         self.attempt_state = "solving"
         self._explain_token = None
+        self._near_best_flagged = False
         self.explanation_label.configure(text="")
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self._show_prompt()
+        self._set_eval(self.current_puzzle.eval_before_cp)
 
     def _on_reveal(self) -> None:
         if self.current_puzzle is None:
@@ -590,6 +659,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
         self.board_widget.set_marked_arrows(self._game_move_arrows())
+        self._set_eval(self.current_puzzle.eval_before_cp)
         self.status_label.configure(
             text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
         )

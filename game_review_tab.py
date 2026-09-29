@@ -21,6 +21,7 @@ import db
 import theme
 from analyzer import MATE_CP
 from board_widget import BOARD_PIXELS, ChessBoardWidget
+from eval_bar import EvalBar
 from models import TIME_FILTERS, PlayerColor, in_time_filter, time_class
 from repertoire_gaps import position_key
 
@@ -80,8 +81,12 @@ class GameReviewTab(ctk.CTkFrame):
         pad.pack(padx=18, pady=16)
         self.title_label = theme.label(pad, "Pick a game on the right", "muted", wraplength=BOARD_PIXELS)
         self.title_label.pack(anchor="w", pady=(0, 8))
-        self.board_widget = ChessBoardWidget(pad, lambda m: None, bg=theme.PANEL_BG)
-        self.board_widget.pack()
+        board_row = ctk.CTkFrame(pad, fg_color="transparent")
+        board_row.pack()
+        self.eval_bar = EvalBar(board_row, BOARD_PIXELS)
+        self.eval_bar.pack(side="left", padx=(0, 8))
+        self.board_widget = ChessBoardWidget(board_row, lambda m: None, bg=theme.PANEL_BG)
+        self.board_widget.pack(side="left")
         self.status_label = theme.label(pad, "", "status", wraplength=BOARD_PIXELS)
         self.status_label.pack(anchor="w", pady=(12, 0))
         self.detail_label = theme.label(pad, "", "body", wraplength=BOARD_PIXELS)
@@ -248,12 +253,33 @@ class GameReviewTab(ctk.CTkFrame):
         for move in self.moves[:self.ply]:
             board.push(move)
         self.board_widget.show_board(board, flipped=self.my_color == chess.BLACK)
+        self._update_eval_bar()
         self._describe(board)
         self._draw_graph()
         if self.ply > 0:
             self.moves_list.selection_clear(0, tk.END)
             self.moves_list.selection_set(self.ply - 1)
             self.moves_list.see(self.ply - 1)
+
+    def _eval_at_ply(self) -> Optional[int]:
+        """Best saved evaluation (YOUR point of view) for the shown position:
+        the eval before your upcoming move, or after your last move, or the
+        nearest earlier one. Only your moves are analyzed, so this is exact on
+        your turn and carried over on your opponent's."""
+        ev = self.evals.get(self.ply)
+        if ev is not None:
+            return ev["cp_before"]
+        for ply in range(self.ply - 1, -1, -1):
+            ev = self.evals.get(ply)
+            if ev is not None:
+                return ev["cp_after"] if ev["cp_after"] is not None else ev["cp_before"]
+        return 0 if self.evals else None
+
+    def _update_eval_bar(self) -> None:
+        cp = self._eval_at_ply()
+        if cp is not None and self.my_color == chess.BLACK:
+            cp = -cp                                  # bar wants White's point of view
+        self.eval_bar.set(cp, flipped=self.my_color == chess.BLACK)
 
     def _describe(self, board: chess.Board) -> None:
         """Explain the move just played and, when it's your turn, show the
