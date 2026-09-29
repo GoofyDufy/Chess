@@ -409,7 +409,6 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
         self.game_label.configure(text=self._game_label_text())
         self._show_prompt()
-        self._show_game_move()
 
         self.queue_listbox.selection_clear(0, tk.END)
         self.queue_listbox.selection_set(index)
@@ -453,7 +452,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.solved_ids.add(self.current_puzzle.id)
             self._refresh_listbox_row(self.queue_index)
             self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
-            self.board_widget.set_marked_arrows([])
+            self.board_widget.set_marked_arrows(self._game_move_arrows())
             self.explanation_label.configure(text=self._explanation_text(correct=True))
             self._explain_solution_async()
         else:
@@ -465,7 +464,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self._show_retry_buttons()
             fen = self.current_puzzle.fen
             self.explanation_label.configure(text="Working out why…")
-            self.board_widget.set_marked_arrows([])
+            self.board_widget.set_marked_arrows(self._game_move_arrows())
             self._explain_async(lambda engine: self._attempt_job(fen, move, engine))
 
     # ---------- move explanations (Stockfish lines + board facts) ----------
@@ -522,25 +521,32 @@ class PuzzleReviewTab(ctk.CTkFrame):
     def _attempt_job(self, fen: str, move: chess.Move, engine):
         """Explanation of a wrong try + the computer's reply as a green arrow."""
         text, line = explain.explain_attempt(fen, move, engine, with_line=True)
-        arrows = [(line[0].from_square, line[0].to_square, REPLY_COLOR)] if line else []
+        arrows = self._game_move_arrows()
         if line:
+            arrows.append((line[0].from_square, line[0].to_square, REPLY_COLOR))
             board = chess.Board(fen)
             board.push(move)
             text += f"\nGreen arrow: the computer's reply {board.san(line[0])}."
+        if any(color == GAME_MOVE_COLOR for _, _, color in arrows):
+            text += f" Blue arrow: your game move {self.current_puzzle.played_move_san}."
         return text, arrows
 
-    def _show_game_move(self) -> None:
-        """Blue arrow + note for the move you actually played in the game."""
+    def _game_move_arrows(self):
+        """Blue arrow for the move you played in the game - only once you've
+        made a move, and only if that piece is still where it started (so the
+        arrow never begins on an empty square)."""
         p = self.current_puzzle
         if p is None or not p.played_move_san:
-            return
+            return []
         try:
-            move = chess.Board(p.fen).parse_san(p.played_move_san)
+            start_board = chess.Board(p.fen)
+            move = start_board.parse_san(p.played_move_san)
         except ValueError:
-            return
-        self.board_widget.set_marked_arrows([(move.from_square, move.to_square, GAME_MOVE_COLOR)])
-        self.explanation_label.configure(
-            text=f"In your game you played {p.played_move_san} (blue arrow). Find something better.")
+            return []
+        now = self.board_widget.board
+        if now is None or now.piece_at(move.from_square) != start_board.piece_at(move.from_square):
+            return []
+        return [(move.from_square, move.to_square, GAME_MOVE_COLOR)]
 
     def _eval_summary(self) -> str:
         p = self.current_puzzle
@@ -572,7 +578,6 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self._show_prompt()
-        self._show_game_move()
 
     def _on_reveal(self) -> None:
         if self.current_puzzle is None:
@@ -584,7 +589,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
-        self.board_widget.redraw()
+        self.board_widget.set_marked_arrows(self._game_move_arrows())
         self.status_label.configure(
             text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
         )
