@@ -25,6 +25,7 @@ import chess.engine
 import engine_locator
 import explain
 import stats
+import style
 import theme
 from play_window import PlayWindow
 from board_widget import BOARD_PIXELS, ChessBoardWidget
@@ -39,6 +40,9 @@ TYPE_COLORS = {
 }
 
 WEAK_SPOTS = "Weak spots"
+ALL_POSITIONS = "All positions"
+SHARP_ONLY = "Sharp (one best move)"
+QUIET_ONLY = "Quiet (several good moves)"
 ENDGAMES = "Endgames"
 
 DEFAULT_THRESHOLD_PAWNS = "1.5"
@@ -234,6 +238,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         )
         self.type_filter_dropdown.pack(side="right")
 
+        position_row = ctk.CTkFrame(queue_box, fg_color="transparent")
+        position_row.pack(fill="x", pady=(0, 8))
+        theme.label(position_row, "Position", "muted").pack(side="left")
+        self.position_var = tk.StringVar(value=ALL_POSITIONS)
+        theme.option_menu(position_row, [ALL_POSITIONS, SHARP_ONLY, QUIET_ONLY], self.position_var,
+                          lambda _: self._reload_queue(), width=230).pack(side="right")
+
         # packed before the list (at the bottom) so it's never clipped
         self.queue_count_label = theme.label(queue_box, "", "muted")
         self.queue_count_label.pack(side="bottom", anchor="w", pady=(8, 0))
@@ -294,11 +305,17 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.queue = sorted((p for p in self.queue if p.id in weak), key=lambda p: -weak[p.id])
         elif selected_type == ENDGAMES:
             self.queue = [p for p in self.queue if stats.is_endgame(p.fen)]
+        position = self.position_var.get()
+        if position != ALL_POSITIONS:
+            # sharp = one clearly best move (engine's top choice far ahead of its 2nd)
+            sharp = style.puzzle_sharpness(self.conn, self.queue)
+            self.queue = [p for p in self.queue if sharp.get(p.id) == (position == SHARP_ONLY)]
         empty_text = {
             WEAK_SPOTS: "No weak spots right now. Puzzles you miss show up here until you "
                         "solve them twice in a row.",
             ENDGAMES: "No endgame puzzles in this filter yet.",
-        }.get(selected_type, "No puzzles yet. Import your games, then click Analyze new games.")
+        }.get(selected_type, "No puzzles match these filters." if position != ALL_POSITIONS else
+               "No puzzles yet. Import your games, then click Analyze new games.")
 
         self._refresh_listbox()
         if self.queue:

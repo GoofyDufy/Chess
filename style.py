@@ -203,3 +203,23 @@ def compute_style(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = N
             report.style = "balanced"
             report.verdict = f"No clear preference — you're a balanced player. {detail}"
     return report
+
+
+def puzzle_sharpness(conn: sqlite3.Connection, puzzles) -> Dict[str, bool]:
+    """puzzle id -> True if its position is sharp (one clearly best move),
+    using the cached engine data for that exact position when available,
+    else the check / hanging-piece fallback (see is_sharp)."""
+    game_ids = {p.source_game_id for p in puzzles if p.source_game_id}
+    rows = {}
+    if game_ids:
+        marks = ",".join("?" * len(game_ids))
+        for r in conn.execute(
+            f"SELECT game_id, fen_before, cp_before, cp_second FROM move_evaluations WHERE game_id IN ({marks})",
+            list(game_ids),
+        ):
+            rows[(r["game_id"], r["fen_before"])] = r
+    out = {}
+    for p in puzzles:
+        row = rows.get((p.source_game_id, p.fen)) or {"fen_before": p.fen, "cp_before": 0, "cp_second": None}
+        out[p.id] = is_sharp(row)
+    return out
