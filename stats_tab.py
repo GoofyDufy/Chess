@@ -16,6 +16,7 @@ import db
 import explorer
 import lichess_ui
 import opening_importer
+import opening_tree
 import openings_catalog
 import repertoire_gaps
 import stats
@@ -217,8 +218,8 @@ class StatsTab(ctk.CTkFrame):
             "Moves Lichess players at your level often choose at positions in your repertoire, "
             "with no reply in your lines yet — most likely to face first. Select one and click Add.",
             [("type", "Line (unanswered move last)", 330), ("color", "As", 55),
-             ("faced", "You'd face it", 100), ("share", "Played here", 90), ("score", "They score", 80),
-             ("reply", "Suggested reply", 160)],
+             ("where", "Where", 100), ("faced", "You'd face it", 100), ("share", "Played here", 90),
+             ("score", "They score", 80), ("reply", "Suggested reply", 160)],
         )
         self._card_of(self.popular_tree).grid_remove()
         self._popular: List[repertoire_gaps.PopularGap] = []
@@ -277,6 +278,12 @@ class StatsTab(ctk.CTkFrame):
             bands = explorer.rating_bands(self.conn)
             self._popular = repertoire_gaps.popular_gaps(
                 self.conn, lambda fen: explorer.cached(self.conn, fen, bands))
+            # inside your openings first; before they start = other openings
+            starts: dict = {}
+            for rep, color in db.list_repertoires(self.conn):
+                starts.setdefault(color, []).append(opening_tree.start_path(self.conn, rep, PlayerColor(color)))
+            repertoire_gaps.mark_inside(self._popular, starts)
+            self._popular.sort(key=lambda g: (not g.inside, -g.frequency))
 
         def after_positions(fetched, error):
             if error:
@@ -349,9 +356,12 @@ class StatsTab(ctk.CTkFrame):
                      "appear under Lines you face most — add the most common ones from there.")
         if self.gap_source.get() == GAPS_FROM_LICHESS:
             bands = explorer.rating_bands(self.conn)
+            inside = sum(1 for g in self._popular if g.inside)
             note = self._popular_status or (
-                f"{len(self._popular)} popular move(s) without an answer in your repertoire "
-                f"(Lichess blitz/rapid, players {explorer.describe_bands(bands)}).")
+                f"{inside} popular move(s) inside your openings without an answer, "
+                f"{len(self._popular) - inside} before your openings start (other openings, greyed) — "
+                f"Lichess blitz/rapid, players {explorer.describe_bands(bands)}. Change where an opening "
+                f"starts by right-clicking it in Opening Drill → Tree.")
         self.rep_note_label.configure(text=note)
 
         popular = [g for g in self._popular if starts_with(g.prefix + [g.move])]
@@ -360,9 +370,9 @@ class StatsTab(ctk.CTkFrame):
             self._rep_items[iid] = g
             reply = f"{g.suggestion} ({g.suggestion_source})" if g.suggestion else "–"
             self.popular_tree.insert("", "end", iid=iid, values=(
-                g.line, g.color.capitalize(), f"{100 * g.frequency:.1f}%", f"{100 * g.share:.0f}%",
-                f"{100 * g.opponent_score:.0f}%", reply,
-            ))
+                g.line, g.color.capitalize(), "in opening" if g.inside else "before it",
+                f"{100 * g.frequency:.1f}%", f"{100 * g.share:.0f}%", f"{100 * g.opponent_score:.0f}%", reply,
+            ), tags=() if g.inside else ("before",))
 
         gaps = [g for g in r.gaps if r.has_repertoire[g.color] and starts_with(g.prefix + [g.move])]
         for i, g in enumerate(gaps):
@@ -561,6 +571,7 @@ class StatsTab(ctk.CTkFrame):
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="left", fill="y")
         tree.tag_configure("weak", foreground=theme.ERROR)
+        tree.tag_configure("before", foreground=theme.TEXT_MUTED)    # before your opening starts
         return tree
 
     def _sort(self, tree: ttk.Treeview, key: str) -> None:

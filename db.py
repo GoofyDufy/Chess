@@ -119,6 +119,17 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- Spot the Tactic rounds: was there a tactic, what you answered, and
+-- whether your move afterwards was good (see spot.py)
+CREATE TABLE IF NOT EXISTS spot_attempts (
+    fen TEXT,
+    is_tactic INTEGER,
+    reason TEXT,
+    said_tactic INTEGER,
+    move_ok INTEGER,
+    attempted_at TEXT
+);
+
 -- Lichess Opening Explorer answers, so each position is downloaded once
 -- (key = rating bands | speeds | position without move counters)
 CREATE TABLE IF NOT EXISTS explorer_cache (
@@ -458,6 +469,14 @@ def record_attempt(conn: sqlite3.Connection, item_type: str, item_id: str, corre
     )
     conn.commit()
     return cur.lastrowid
+
+
+def set_attempt_result(conn: sqlite3.Connection, attempt_id: int, correct: bool, outcome: str) -> None:
+    """Rewrites a saved first try — e.g. a multi-move puzzle whose first move
+    was right but a later move wasn't."""
+    conn.execute("UPDATE attempts SET correct = ?, outcome = ? WHERE rowid = ?",
+                 (int(correct), outcome, attempt_id))
+    conn.commit()
 
 
 def tried_today(conn: sqlite3.Connection, item_type: str, item_id: str) -> bool:

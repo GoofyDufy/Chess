@@ -32,6 +32,7 @@ from level_card import LevelCard
 from progress_tab import ProgressTab
 from puzzle_tab import PuzzleReviewTab
 from scout_tab import ScoutTab
+from spot_tab import SpotTab
 from stats_tab import StatsTab
 
 SIDEBAR_WIDTH = 200
@@ -163,15 +164,17 @@ class App(ctk.CTk):
                              on_repertoire_changed=drill_tab._refresh_repertoire_list,
                              on_review_game=review_game)
         progress_tab = ProgressTab(content, self.conn)
+        spot_tab = SpotTab(content, self.conn, on_review_game=review_game)
         scout_tab = ScoutTab(content, self.conn)
 
         for name, page in (("Import & Analyze", puzzle_tab.import_page),
-                           ("Puzzle Review", puzzle_tab), ("Game Review", review_tab),
+                           ("Puzzle Review", puzzle_tab), ("Spot the Tactic", spot_tab),
+                           ("Game Review", review_tab),
                            ("Opening Drill", drill_tab), ("Stats", stats_tab),
                            ("Progress", progress_tab), ("Opponent Prep", scout_tab)):
             self.pages[name] = page
             b = theme.button(self.nav_frame, name, command=lambda n=name: self.show_page(n),
-                             kind="ghost", anchor="w", height=42)
+                             kind="ghost", anchor="w", height=36)   # 8 fit above the level card at 768 px
             b.pack(fill="x", padx=12, pady=2)
             self.nav_buttons[name] = b
 

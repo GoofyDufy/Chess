@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import db
+import spot
 
 # ---- XP per first try ----
 PUZZLE_XP = {"correct": 10, "near_best": 5, "missed": 2, "revealed": 0}
@@ -63,6 +64,10 @@ def level_for(total_xp: int) -> Level:
 
 
 def total_xp(conn: sqlite3.Connection) -> int:
+    return _attempts_xp(conn) + spot.xp(conn)    # + Spot the Tactic rounds (own table)
+
+
+def _attempts_xp(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         "SELECT item_type, item_id, correct, outcome, sharp, attempted_at FROM attempts ORDER BY attempted_at"
     ).fetchall()

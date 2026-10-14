@@ -92,6 +92,16 @@ class OpeningDrillSession:
         self.path_index = 0
         return True
 
+    def start_line(self, path: List[OpeningLine]) -> bool:
+        """Drill exactly this line (e.g. picked in the Tree view)."""
+        if not path:
+            return False
+        self.target_path = list(path)
+        self.line_name = path[0].line_name or self.repertoire_name
+        self.board = chess.Board()
+        self.path_index = 0
+        return True
+
     def restart(self) -> None:
         """Same line again from the first move."""
         self.board = chess.Board()

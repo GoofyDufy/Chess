@@ -18,7 +18,9 @@ import analyzer  # noqa: E402
 import db  # noqa: E402
 import explorer  # noqa: E402
 import opening_importer  # noqa: E402
+import opening_tree  # noqa: E402
 import progression  # noqa: E402
+import spot  # noqa: E402
 import repertoire_gaps  # noqa: E402
 from drill import OpeningDrillSession  # noqa: E402
 from models import Game, GameResult, MoveEvaluation, PlayerColor, time_class  # noqa: E402
@@ -130,6 +132,57 @@ class OpeningImportAndDrillTests(unittest.TestCase):
             s.play_opponent_move()
         self.assertEqual(s.reveal_and_advance(), "Nc3")
         self.assertEqual(s.last_move_note(), "note on Nc3")
+
+
+class OpeningTreeTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        opening_importer.import_pgn_text(QG_PGN, "QG", PlayerColor.WHITE, self.conn)
+
+    def test_lines_merge_until_they_differ(self):
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        self.assertEqual(len(tree.leaves), 2)
+        trunk = [b for b in tree.branches if b.parent is None]
+        self.assertEqual(len(trunk), 1)                       # 1.d4 d5 2.c4 shared
+        self.assertEqual([n.move.move_san for n in trunk[0].nodes], ["d4", "d5", "c4"])
+        self.assertEqual(sorted(c.nodes[0].move.move_san for c in trunk[0].children), ["c6", "e6"])
+        self.assertEqual(trunk[0].lines, 2)
+
+    def test_layout_puts_leaves_on_top_and_knots_over_their_leaves(self):
+        tree = opening_tree.layout(opening_tree.build(self.conn, "QG", PlayerColor.WHITE), 400, 420)
+        leaves = [b for b in tree.branches if not b.children]
+        self.assertTrue(all(b.end.y == opening_tree.TOP for b in leaves))
+        knot = next(b for b in tree.branches if b.parent is None).end
+        self.assertAlmostEqual(knot.x, sum(b.end.x for b in leaves) / 2)
+        self.assertGreater(tree.root.y, knot.y)               # grows upward from the root
+        node = tree.node_for_path(["d2d4", "d7d5", "c2c4", "e7e6"])
+        self.assertEqual(node.lines()[0][0], "QG - Orthodox")
+
+    def test_opening_start_defaults_to_the_shared_trunk_and_can_move(self):
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        start = opening_tree.start_node(self.conn, tree, "QG", PlayerColor.WHITE)
+        self.assertEqual([m.move_san for m in start.path], ["d4", "d5", "c4"])   # where both lines agree
+        early = tree.node_for_path(["d2d4"])
+        self.assertFalse(opening_tree.is_inside(early, start))
+        self.assertTrue(opening_tree.is_inside(tree.node_for_path(["d2d4", "d7d5", "c2c4", "e7e6"]), start))
+        opening_tree.set_start(self.conn, "QG", PlayerColor.WHITE, early)          # move it earlier
+        self.assertIs(opening_tree.start_node(self.conn, tree, "QG", PlayerColor.WHITE), early)
+        opening_tree.set_start(self.conn, "QG", PlayerColor.WHITE, None)           # back to the default
+        self.assertEqual(opening_tree.start_path(self.conn, "QG", PlayerColor.WHITE), ["d2d4", "d7d5", "c2c4"])
+
+    def test_gaps_before_the_opening_starts_are_marked(self):
+        gaps = [repertoire_gaps.PopularGap("white", ["d4"], "Nf6", .5, 1, 100, .5),
+                repertoire_gaps.PopularGap("white", ["d4", "d5", "c4"], "dxc4", .2, .5, 100, .5)]
+        repertoire_gaps.mark_inside(gaps, {"white": [["d2d4", "d7d5", "c2c4"]]})
+        self.assertEqual([g.inside for g in gaps], [False, True])
+
+    def test_many_lines_make_the_tree_wider_than_the_view(self):
+        pgn = "".join(f'[Event "L{i}"]\n\n1. e4 {m} *\n\n' for i, m in
+                      enumerate(["e5", "c5", "e6", "c6", "d5", "d6", "Nf6", "g6", "b6", "a6", "Nc6", "b5"]))
+        opening_importer.import_pgn_text(pgn, "Wide", PlayerColor.WHITE, self.conn)
+        tree = opening_tree.layout(opening_tree.build(self.conn, "Wide", PlayerColor.WHITE), 300, 420)
+        self.assertEqual(len(tree.leaves), 12)
+        self.assertGreater(tree.width, 300)
 
 
 class RepertoireGapTests(unittest.TestCase):
@@ -329,6 +382,142 @@ class LichessExplorerTests(unittest.TestCase):
     def test_rating_bands_around_your_level(self):
         self.assertEqual(explorer.rating_bands(self.conn), "1400,1600,1800")   # no games yet
         self.assertEqual(explorer.describe_bands("1600,1800"), "rated 1600–2000")
+
+
+class FakeEngine:
+    """Stockfish stand-in: analyse() answers from a {fen-prefix: [(pv ucis, cp or ('mate', n))]} table."""
+    def __init__(self, table):
+        self.table = table
+
+    def analyse(self, board, limit, multipv=None):
+        lines = []
+        for ucis, score in self.table[board.fen().split(" ")[0]]:
+            pov = chess.engine.Mate(score[1]) if isinstance(score, tuple) else chess.engine.Cp(score)
+            lines.append({"pv": [chess.Move.from_uci(u) for u in ucis],
+                          "score": chess.engine.PovScore(pov, board.turn)})
+        return lines if multipv else lines[0]
+
+
+class SpotTheTacticTests(unittest.TestCase):
+    # White to move, Black's queen on d5 can be taken by the knight on c3
+    HANGING = "rnb1kbnr/ppp1pppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR w KQkq - 0 3"
+
+    def test_material_win_is_a_tactic_and_counted_after_the_reply(self):
+        board = chess.Board(self.HANGING)
+        eng = FakeEngine({board.fen().split()[0]: [(["c3d5", "c7c6", "d5c3"], 900), (["d2d4"], -400)]})
+        v = spot.classify(eng, board)
+        self.assertEqual((v.is_tactic, v.reason, v.gain), (True, "material", 9))
+        self.assertIn("forcing sequence that wins a queen", v.describe(board))
+
+    def test_mate_quiet_and_sharp_but_not_tactical(self):
+        board = chess.Board()
+        key = board.fen().split()[0]
+        self.assertEqual(spot.classify(FakeEngine({key: [(["e2e4"], ("mate", 3)), (["d2d4"], 0)]}), board).reason, "mate")
+        self.assertEqual(spot.classify(FakeEngine({key: [(["e2e4"], ("mate", 9)), (["d2d4"], 0)]}), board).reason,
+                         "unclear")                                     # too long to count as a tactic
+        # only one good move, but nothing forcing: not a tactic, and not quiet either -> skipped
+        self.assertEqual(spot.classify(FakeEngine({key: [(["e2e4"], 150), (["d2d4"], 0)]}), board).reason, "unclear")
+        quiet = spot.classify(FakeEngine({key: [(["e2e4"], 30), (["d2d4"], 20)]}), board)
+        self.assertEqual((quiet.is_tactic, quiet.reason), (False, "quiet"))
+
+    def test_material_won_by_a_quiet_move_is_not_a_tactic(self):
+        # same hanging queen, but the line starts with a quiet move (a2a3) before taking it
+        board = chess.Board(self.HANGING)
+        pv = ["a2a3", "a7a6", "c3d5", "c7c6"]
+        self.assertEqual(spot.forcing_gain(board, [chess.Move.from_uci(u) for u in pv]), 0)
+        self.assertEqual(spot.forcing_gain(board, [chess.Move.from_uci(u) for u in ["c3d5", "c7c6"]]), 9)
+
+    def test_winning_back_what_was_just_taken_is_not_a_tactic(self):
+        board = chess.Board(self.HANGING)
+        line = [chess.Move.from_uci(u) for u in ["c3d5", "c7c6"]]
+        self.assertEqual(spot.forcing_gain(board, line, just_lost=0), 9)
+        self.assertEqual(spot.forcing_gain(board, line, just_lost=9), 0)     # they'd just taken your queen
+        self.assertEqual(spot.forcing_gain(board, line, just_lost=3), 6)     # ...or a knight: still +6
+
+    def test_quiet_positions_start_after_five_moves_each(self):
+        self.assertFalse(spot.usable_as_quiet(spot.Candidate("g", 9, START, "e2e4")))
+        self.assertTrue(spot.usable_as_quiet(spot.Candidate("g", 10, START, "e2e4")))
+        conn = fresh_conn()
+        conn.execute("INSERT INTO games (id, chess_com_url, pgn, played_at, time_control, my_color, "
+                     "opponent_username, result) VALUES ('g', 'u', '', '2026-01-01', '600', 'white', 'x', 'win')")
+        for ply in (2, 8, 12):
+            conn.execute("INSERT INTO move_evaluations (game_id, ply, fen_before, move_uci, best_move_uci, "
+                         "cp_before, cp_after, depth, second_move_uci, cp_second, third_move_uci, cp_third) "
+                         "VALUES ('g', ?, ?, 'e2e4', 'e2e4', 20, 20, 14, 'd2d4', 15, 'c2c4', 10)", (ply, f"fen{ply}"))
+        self.assertEqual([c.ply for c in spot.candidates(conn, True, set())], [12])
+
+    def test_solution_stops_at_the_winning_move(self):
+        board = chess.Board(self.HANGING)
+        pv = [chess.Move.from_uci(u) for u in ["c3d5", "c7c6", "d5c3", "e7e5"]]
+        score = chess.engine.PovScore(chess.engine.Cp(900), chess.WHITE)
+        # the queen is won by the first move; the line ends there, with your move
+        self.assertEqual(spot.solution_for(board, pv, score), pv[:1])
+        self.assertEqual(spot.forcing_win(board, pv), (9, 1))
+
+    def test_multi_move_solution_and_mate_line(self):
+        # 1.e4 e5 2.Bc4 Nc6 3.Qh5 Nf6?? 4.Qxf7# — a mate in one from the position before it
+        board = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+        pv = [chess.Move.from_uci("h5f7")]
+        mate = chess.engine.PovScore(chess.engine.Mate(1), chess.WHITE)
+        self.assertEqual(spot.solution_for(board, pv, mate), pv)
+        self.assertEqual(spot.mate_line(board, pv + [chess.Move.from_uci("a7a6")]), pv)   # stops at mate
+        # Qa4 attacks the undefended queen (a threat), the king steps aside, Qxb5: two of your moves
+        fork = chess.Board("4k3/8/8/1q6/8/8/8/3QK3 w - - 0 1")
+        line = [chess.Move.from_uci(u) for u in ["d1a4", "e8e7", "a4b5"]]
+        cp = chess.engine.PovScore(chess.engine.Cp(900), chess.WHITE)
+        sol = spot.solution_for(fork, line + [chess.Move.from_uci("e7e6")], cp)
+        self.assertEqual(sol, line)
+
+    def test_forcing_moves_checks_captures_threats(self):
+        board = chess.Board()
+        self.assertFalse(spot.is_forcing(board, chess.Move.from_uci("e2e4")))
+        # Bb5 attacks the knight on c6? no - the knight is defended and worth the same: not a threat
+        ruy = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
+        self.assertFalse(spot.is_forcing(ruy, chess.Move.from_uci("f1b5")))
+        # d4-d5 attacks the knight on c6 with a pawn: a new threat (knight worth more than the pawn)
+        push = chess.Board("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/8/PPP2PPP/RNBQKBNR w KQkq - 1 3")
+        self.assertTrue(spot.is_forcing(push, chess.Move.from_uci("d4d5")))
+        # attacking a defended pawn of equal value isn't a threat; a capture always is forcing
+        four = chess.Board("r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 4 4")
+        self.assertFalse(spot.is_forcing(four, chess.Move.from_uci("d2d4")))
+        self.assertTrue(spot.is_forcing(four, chess.Move.from_uci("f3e5")))
+
+    def test_trivial_recapture_and_check_are_skipped(self):
+        # 1.e4 d5 2.exd5 — Black recaptures on d5 with the queen
+        board = chess.Board("rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 2")
+        self.assertTrue(spot.is_trivial(board, chess.Move.from_uci("d8d5"), chess.Move.from_uci("e4d5"), 1))
+        self.assertFalse(spot.is_trivial(board, chess.Move.from_uci("g8f6"), chess.Move.from_uci("e4d5"), 1))
+        in_check = chess.Board("rnb1kbnr/pppp1ppp/8/4p3/5PPq/8/PPPPP2P/RNBQKBNR w KQkq - 1 3")
+        self.assertTrue(spot.is_trivial(in_check, chess.Move.from_uci("g2g3"), None, 0))
+
+    def test_judging_moves(self):
+        board = chess.Board(self.HANGING)
+        v = spot.Verdict(True, "material", chess.Move.from_uci("c3d5"), 900, -400)
+        self.assertEqual(spot.judge_move(None, board, v, chess.Move.from_uci("c3d5")), (True, 0))
+        after = board.copy(); after.push(chess.Move.from_uci("d2d4"))
+        eng = FakeEngine({after.fen().split()[0]: [([], 400)]})       # Black to move, +4 for Black
+        self.assertEqual(spot.judge_move(eng, board, v, chess.Move.from_uci("d2d4")), (False, 1300))
+
+    def test_tactic_needs_the_best_move_quiet_allows_half_a_pawn(self):
+        board = chess.Board()
+        after = board.copy(); after.push(chess.Move.from_uci("d2d4"))
+        eng = FakeEngine({after.fen().split()[0]: [([], -130)]})      # Black to move: White +1.30
+        tactic = spot.Verdict(True, "only_move", chess.Move.from_uci("e2e4"), 150, 0)
+        quiet = spot.Verdict(False, "quiet", chess.Move.from_uci("e2e4"), 150, 140)
+        self.assertEqual(spot.judge_move(eng, board, tactic, chess.Move.from_uci("d2d4")), (False, 20))
+        self.assertEqual(spot.judge_move(eng, board, quiet, chess.Move.from_uci("d2d4")), (True, 20))
+
+    def test_scoring_and_summary(self):
+        conn = fresh_conn()
+        tactic = spot.Verdict(True, "only_move", chess.Move.from_uci("e2e4"), 150, 0)
+        quiet = spot.Verdict(False, "quiet", chess.Move.from_uci("e2e4"), 20, 10)
+        spot.record(conn, "f1", tactic, True, True)     # spotted, good move
+        spot.record(conn, "f2", quiet, True, True)      # false alarm, good move
+        spot.record(conn, "f3", tactic, False, False)   # missed it, bad move
+        s = spot.summary(conn)
+        self.assertEqual((s.rounds, s.spotted, s.tactics, s.false_alarms, s.quiet, s.moves_ok), (3, 1, 2, 1, 1, 2))
+        self.assertEqual(spot.xp(conn), 1 * spot.CALL_XP + 2 * spot.MOVE_XP)
+        self.assertEqual(progression.total_xp(conn), spot.xp(conn))
 
 
 if __name__ == "__main__":

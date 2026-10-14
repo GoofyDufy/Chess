@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from typing import Optional
+from typing import List, Optional
 
 import chess
 
@@ -19,6 +19,7 @@ import lichess_ui
 import random
 
 import opening_importer
+import opening_tree
 import opening_notes
 import progression
 from play_window import PlayWindow
@@ -26,8 +27,10 @@ import theme
 from board_widget import BOARD_PIXELS, ChessBoardWidget
 from drill import DrillResult, OpeningDrillSession, format_move_list
 from models import PlayerColor
+from tree_view import TreeView, move_label as tree_view_label, short_name
 
 ADD_LINES = "Add lines"
+TREE = "Tree"
 
 
 class OpeningDrillTab(ctk.CTkFrame):
@@ -95,7 +98,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         # Setup (pick a line) vs Plans (what the opening is about) vs Add lines
         # (import/edit) — separate views so the column fits short screens
         self.right_switch = ctk.CTkSegmentedButton(
-            right, values=["Setup", "Plans", ADD_LINES], command=self._show_right_view,
+            right, values=["Setup", "Plans", TREE, ADD_LINES], command=self._show_right_view,
             height=34, font=theme.FONT_BOLD, fg_color=theme.PANEL_BG,
             selected_color=theme.CONTROL_BG, selected_hover_color=theme.CONTROL_BG,
             unselected_color=theme.PANEL_BG, unselected_hover_color=theme.PANEL_ALT,
@@ -105,7 +108,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         setup = ctk.CTkFrame(right, fg_color="transparent")
         plans = theme.card(right)
         add_lines = ctk.CTkFrame(right, fg_color="transparent")
-        self._right_views = {"Setup": setup, "Plans": plans, ADD_LINES: add_lines}
+        tree = ctk.CTkFrame(right, fg_color="transparent")
+        self._right_views = {"Setup": setup, "Plans": plans, TREE: tree, ADD_LINES: add_lines}
+        self._build_tree_view(tree)
         self.plans_body = ctk.CTkScrollableFrame(plans, fg_color="transparent")
         self.plans_body.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -178,6 +183,336 @@ class OpeningDrillTab(ctk.CTkFrame):
                 view.pack(fill="both", expand=True)
             else:
                 view.pack_forget()
+        if name == TREE and self._tree is None:
+            self._refresh_tree()
+
+    # ---------- Tree view: the repertoire as a living tree (tree_view.py) ----------
+
+    def _build_tree_view(self, parent) -> None:
+        self._tree: Optional[opening_tree.Tree] = None
+        self._tree_node: Optional[opening_tree.Node] = None
+        self._tree_focus: list = []            # the line ◀ ▶ walk along
+        self._draft: List[chess.Move] = []     # a new branch being played from _tree_node (not saved)
+        self.tree_view = TreeView(parent, self._on_tree_select, on_wheel=self._tree_step)
+        self.tree_view.on_deviation = self._on_deviation
+        self.tree_view.on_context = self._on_tree_context
+        self._start: Optional[opening_tree.Node] = None   # where the opening starts
+        self._deviations: dict = {}            # id(node) -> [opening_tree.Deviation] from Lichess
+        self.tree_view.pack(fill="both", expand=True)
+        info = ctk.CTkFrame(parent, fg_color="transparent")
+        info.pack(fill="x", pady=(10, 0))
+        self.tree_line_label = theme.label(info, "", "heading", wraplength=380)
+        self.tree_line_label.pack(anchor="w")
+        self.tree_moves_label = theme.label(info, "", "muted", wraplength=380)
+        self.tree_moves_label.pack(anchor="w", fill="x", pady=(2, 0))
+        # Lichess players' replies your lines don't cover, at this position
+        self.tree_dev_label = theme.label(info, "", "muted", wraplength=380, text_color="#9AA1AD")
+        self.tree_dev_label.pack(anchor="w", fill="x", pady=(2, 4))
+        self.show_before_var = tk.BooleanVar(value=db.get_setting(self.conn, "tree_show_before") != "0")
+        ctk.CTkCheckBox(
+            info, text="Show other openings (replies before yours starts)", variable=self.show_before_var,
+            command=self._on_show_before, font=theme.FONT_SMALL, text_color=theme.TEXT_SOFT,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, border_color=theme.BORDER_STRONG,
+            checkbox_width=16, checkbox_height=16,
+        ).pack(anchor="w", pady=(0, 8))
+        row = ctk.CTkFrame(info, fg_color="transparent")
+        row.pack(fill="x")
+        theme.button(row, "◀", lambda: self._tree_step(-1), width=44).pack(side="left")
+        theme.button(row, "▶", lambda: self._tree_step(+1), width=44).pack(side="left", padx=(6, 0))
+        self.tree_drill_button = theme.button(row, "Drill this line", self._drill_tree_line, "primary")
+        self.tree_save_button = theme.button(row, "Save branch", self._save_draft, "primary")
+        self.tree_discard_button = theme.button(row, "Discard", self._discard_draft, width=90)
+        self._layout_tree_buttons()
+
+    def _layout_tree_buttons(self) -> None:
+        for b in (self.tree_drill_button, self.tree_save_button, self.tree_discard_button):
+            b.pack_forget()
+        if self._draft:
+            self.tree_save_button.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            self.tree_discard_button.pack(side="left", padx=(6, 0))
+        else:
+            self.tree_drill_button.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+    def _refresh_tree(self) -> None:
+        """Rebuilds the tree for the repertoire picked in Setup."""
+        selection = self._selected_repertoire()
+        if selection is None:
+            self._tree = None
+            self.tree_view.set_tree(None, "")
+            self.tree_line_label.configure(text="No repertoire yet")
+            self.tree_moves_label.configure(text=f"Add some lines ({ADD_LINES}) to grow a tree.")
+            return
+        name, color = selection
+        self._tree = opening_tree.build(self.conn, name, PlayerColor(color))
+        self.tree_view.set_tree(self._tree, name)
+        self._start = opening_tree.start_node(self.conn, self._tree, name, PlayerColor(color))
+        self.tree_view.show_before = self.show_before_var.get()
+        self.tree_view.set_start(self._start)
+        self._update_deviations()
+        self._tree_focus = self._tree.leaves[0][1] if self._tree.leaves else []
+        self._show_tree_node(self._tree.root, follow=False)
+
+    def _on_tree_select(self, node: opening_tree.Node) -> None:
+        """A click in the tree: show that position on the board (this ends a
+        drill in progress — Drill this line starts one from the tree)."""
+        if self._draft and not messagebox.askyesno(
+                "Discard new branch?", "You have a new branch that isn't saved. Discard it?", parent=self):
+            return
+        self._clear_draft()
+        if self.session is not None and not self.session.is_finished():
+            self.session = None
+            self._layout_buttons()
+            self.recap_label.configure(text="")
+            self.move_note_label.configure(text="")
+        lines = node.lines()
+        # keep following the current line if the new position is on it
+        on_focus = self._tree_focus and [n.move_uci for n in self._tree_focus[:node.ply]] == \
+            [n.move_uci for n in node.path]
+        if not on_focus and lines:
+            self._tree_focus = lines[0][1]
+        self._show_tree_node(node, follow=False)
+
+    def _show_tree_node(self, node: opening_tree.Node, follow: bool) -> None:
+        """follow: called from a live drill (the board is the drill's)."""
+        self._tree_node = node
+        self.tree_view.select(node, self._tree_focus)
+        line = next((name for name, path, _ in (self._tree.leaves if self._tree else [])
+                     if path == self._tree_focus), None)
+        rep = self._selected_repertoire()
+        self.tree_line_label.configure(text=short_name(line, rep[0]) if line and rep else "")
+        board, sans = chess.Board(), []
+        for n in node.path:
+            move = chess.Move.from_uci(n.move_uci)
+            prefix = f"{board.fullmove_number}." if board.turn == chess.WHITE else (
+                f"{board.fullmove_number}..." if not sans else "")
+            sans.append(prefix + board.san(move))
+            board.push(move)
+        lines = len(node.lines())
+        where = " ".join(sans) if sans else "Starting position"
+        self.tree_moves_label.configure(text=f"{where}   ·   {lines} line{'s' if lines != 1 else ''} from here")
+        self._show_node_deviations(node)
+        if follow:
+            return
+        flipped = rep is not None and rep[1] == PlayerColor.BLACK.value
+        self.board_widget.show_board(board, flipped=flipped)
+        self.line_name_label.configure(text=f"Exploring: {short_name(line, rep[0])}" if line and rep else "Exploring")
+        note = node.move.notes if node.move is not None else None
+        self.status_label.configure(text="Exploring the tree — Drill this line to practise it.",
+                                    text_color=theme.TEXT_MUTED)
+        self.move_note_label.configure(text=note or "")
+
+    # ---------- Lichess deviations in the tree ----------
+
+    def _update_deviations(self) -> None:
+        """Popular Lichess replies your lines don't cover, from the cached
+        explorer data (downloaded in the background — see _download_opening_data)."""
+        selection = self._selected_repertoire()
+        if self._tree is None or selection is None or not explorer.get_token(self.conn):
+            self._deviations = {}
+        else:
+            bands = explorer.rating_bands(self.conn)
+            self._deviations = opening_tree.deviations(
+                self._tree, lambda fen: explorer.cached(self.conn, fen, bands), PlayerColor(selection[1]))
+        self.tree_view.set_deviations(self._deviations)
+        if self._tree_node is not None:
+            self._show_node_deviations(self._tree_node)
+
+    def _show_node_deviations(self, node: opening_tree.Node) -> None:
+        if not explorer.get_token(self.conn):
+            self.tree_dev_label.configure(
+                text=f"Connect Lichess ({ADD_LINES} → Connect Lichess...) to see where players leave these lines.")
+            return
+        devs = self._deviations.get(id(node), [])
+        before = self._start is not None and not opening_tree.is_inside(node, self._start)
+        rep = self._selected_repertoire()
+        if devs and before:
+            self.tree_dev_label.configure(text=f"Before your {rep[0] if rep else 'opening'} starts — other "
+                                               "openings Lichess players choose here: " + " · ".join(
+                f"{d.san} {d.share:.0%}" for d in devs) + ".")
+        elif devs:
+            self.tree_dev_label.configure(text="Lichess players here also play: " + " · ".join(
+                f"{d.san} {d.share:.0%}" for d in devs) + "  — click one in the tree to answer it.")
+        else:
+            total = sum(len(v) for v in self._deviations.values())
+            self.tree_dev_label.configure(
+                text=f"{total} popular deviation{'s' if total != 1 else ''} from these lines (grey rings — select one to see them)."
+                if total else "No popular deviations found yet (data downloads in the background).")
+
+    def _on_show_before(self) -> None:
+        db.set_setting(self.conn, "tree_show_before", "1" if self.show_before_var.get() else "0")
+        self.tree_view.show_before = self.show_before_var.get()
+        self.tree_view.set_deviations(self._deviations)
+
+    def _on_tree_context(self, node: opening_tree.Node, x: int, y: int) -> None:
+        """Right-click in the tree: move where the opening starts."""
+        selection = self._selected_repertoire()
+        if selection is None or self._tree is None:
+            return
+        name, color = selection
+        menu = tk.Menu(self, tearoff=0, bg=theme.PANEL_ALT, fg=theme.TEXT, activebackground=theme.CONTROL_BG,
+                       activeforeground=theme.TEXT, font=theme.FONT_NATIVE)
+        label = "the starting position" if node.move is None else tree_view_label(node)
+        menu.add_command(label=f"{name} starts here (after {label})" if node.move else f"{name} starts at move 1",
+                         command=lambda: self._set_opening_start(node))
+        menu.add_command(label="Use the default start (where all lines still agree)",
+                         command=lambda: self._set_opening_start(None))
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _set_opening_start(self, node: Optional[opening_tree.Node]) -> None:
+        name, color = self._selected_repertoire()
+        opening_tree.set_start(self.conn, name, PlayerColor(color), node)
+        self._start = opening_tree.start_node(self.conn, self._tree, name, PlayerColor(color))
+        self.tree_view.set_start(self._start)
+        if self._tree_node is not None:
+            self._show_node_deviations(self._tree_node)
+
+    def _on_deviation(self, node: opening_tree.Node, uci: str) -> None:
+        """A wild twig clicked: start a new branch with that reply."""
+        self._on_tree_select(node)
+        if self._tree_node is not node:      # the user kept an unsaved branch
+            return
+        self._draft = [chess.Move.from_uci(uci)]
+        self._show_draft()
+        self.status_label.configure(text="Their reply is on the board — play your answer, then Save branch.",
+                                    text_color=theme.TEXT_MUTED)
+
+    def _tree_step(self, delta: int) -> None:
+        """◀ / ▶ (or ← / →, or the wheel): back to the parent, or on along the
+        current line. With a new branch: ◀ takes back its last move."""
+        if self._tree is None or self._tree_node is None:
+            return
+        if self._draft:
+            if delta < 0:
+                self._draft.pop()
+                self._show_draft() if self._draft else self._discard_draft()
+            return
+        node = self._tree_node
+        if delta < 0:
+            target = node.parent
+        else:
+            ply = node.ply
+            nxt = self._tree_focus[ply] if ply < len(self._tree_focus) else None
+            target = next((c for c in node.children if nxt is not None and c.move.move_uci == nxt.move_uci),
+                          node.children[0] if node.children else None)
+        if target is not None:
+            self._on_tree_select(target)
+
+    # ---------- growing a new branch from the tree ----------
+
+    def _exploring(self) -> bool:
+        """The board is showing a tree position (not a drill)."""
+        return (self._tree is not None and self._tree_node is not None and self.right_switch.get() == TREE
+                and (self.session is None or self.session.is_finished()))
+
+    def _explore_move(self, move: chess.Move) -> None:
+        """A move played on the board while exploring: follow it if it's in
+        the repertoire, otherwise it starts (or extends) a new branch."""
+        node = self._tree_node
+        board = node.board()
+        for m in self._draft:
+            board.push(m)
+        if move not in board.legal_moves:
+            return
+        if self.session is not None:          # a finished drill: back to exploring
+            self.session = None
+            self._layout_buttons()
+        if not self._draft:
+            child = next((c for c in node.children if c.move.move_uci == move.uci()), None)
+            if child is not None:
+                self._on_tree_select(child)
+                return
+        self._draft.append(move)
+        self._show_draft()
+
+    def _draft_sans(self) -> List[str]:
+        """'7.b3', 'b6', '8.Bb2' — Black's move numbered only when it comes first."""
+        board, sans = self._tree_node.board(), []
+        for i, m in enumerate(self._draft):
+            number = board.fullmove_number
+            prefix = f"{number}." if board.turn == chess.WHITE else (f"{number}..." if i == 0 else "")
+            sans.append(prefix + board.san(m))
+            board.push(m)
+        return sans
+
+    def _show_draft(self) -> None:
+        board = self._tree_node.board()
+        for m in self._draft:
+            board.push(m)
+        self.board_widget.show_board(board)
+        sans = self._draft_sans()
+        self.tree_view.set_draft(self._tree_node, sans)
+        self.tree_line_label.configure(text="New branch")
+        self.tree_moves_label.configure(text=" ".join(sans))
+        self.line_name_label.configure(text="Exploring: new branch")
+        self.status_label.configure(text="New branch — play moves for both sides, then Save branch. "
+                                         "◀ takes a move back.", text_color=theme.TEXT_MUTED)
+        self.move_note_label.configure(text="")
+        self._layout_tree_buttons()
+
+    def _clear_draft(self) -> None:
+        self._draft = []
+        self.tree_view.draft_anchor, self.tree_view.draft_sans = None, []
+        self._layout_tree_buttons()
+
+    def _discard_draft(self) -> None:
+        self._clear_draft()
+        if self._tree_node is not None:
+            self._show_tree_node(self._tree_node, follow=False)
+
+    def _save_draft(self) -> None:
+        """Adds the new branch to the repertoire as its own line: the moves
+        to where it leaves the tree, then the new ones."""
+        selection = self._selected_repertoire()
+        if not self._draft or selection is None:
+            return
+        rep_name, color = selection
+        node = self._tree_node
+        board, sans = chess.Board(), []
+        for m in [chess.Move.from_uci(n.move_uci) for n in node.path] + self._draft:
+            sans.append(board.san(m))
+            board.push(m)
+        ucis = [m.uci() for m in board.move_stack]
+        line = next((name for name, path, _ in self._tree.leaves if path == self._tree_focus), None)
+        base = short_name(line, rep_name) if line else rep_name
+        suggestion = f"{base} — {self._draft_sans()[0]}"
+        dialog = ctk.CTkInputDialog(title="Save new branch",
+                                    text=f"Name for this line (leave empty for “{suggestion}”):")
+        name = dialog.get_input()
+        if name is None:                      # cancelled: keep the branch
+            return
+        name = (name.strip() or suggestion).replace('"', "'")
+        pgn = f'[Event "{rep_name} - {name}"]\n\n{format_move_list(sans)} *\n'
+        opening_importer.import_pgn_text(pgn, rep_name, PlayerColor(color), self.conn)
+        self._clear_draft()
+        self._refresh_repertoire_list()       # regrows the tree with the new line
+        if self._tree is None:
+            self._refresh_tree()
+        new = self._tree.node_for_path(ucis) if self._tree else None
+        if new is not None:
+            self._tree_focus = new.lines()[0][1] if new.lines() else self._tree_focus
+            self._show_tree_node(new, follow=False)
+        self.status_label.configure(text=f"Saved “{name}” to {rep_name}.", text_color=theme.SUCCESS)
+
+    def _drill_tree_line(self) -> None:
+        selection = self._selected_repertoire()
+        if selection is None or not self._tree_focus:
+            return
+        name, color = selection
+        self.session = OpeningDrillSession(self.conn, name, PlayerColor(color), move_share=self._move_share)
+        if self.session.start_line(self._tree_focus):
+            self._begin_line("line", keep_view=True)
+
+    def _follow_drill_in_tree(self) -> None:
+        """While drilling, the tree's marker moves along with the board."""
+        if self._tree is None or self.session is None:
+            return
+        node = self._tree.node_for_path([m.uci() for m in self.session.board.move_stack])
+        if node is not None:
+            self._tree_focus = self.session.target_path
+            self._show_tree_node(node, follow=True)
 
     def _render_selected_plans(self) -> None:
         """Plans for the variation highlighted in the list (before drilling)."""
@@ -277,6 +612,7 @@ class OpeningDrillTab(ctk.CTkFrame):
             return
         if self._preview_index is None:
             self.board_widget.show_board(self.session.board)
+            self._follow_drill_in_tree()
             return
         board = chess.Board()
         for node in self.session.target_path[:self._preview_index]:
@@ -304,12 +640,15 @@ class OpeningDrillTab(ctk.CTkFrame):
             text_color=theme.TEXT_MUTED)
 
     def _on_arrow_key(self, delta: int) -> None:
-        if not self.winfo_ismapped() or not self._show_full_line:
+        if not self.winfo_ismapped():
             return
         focused = self.focus_get()
         if focused is not None and focused.winfo_class() in ("Entry", "Text"):
             return
-        self._step_preview(delta)
+        if self._show_full_line:
+            self._step_preview(delta)
+        elif self.right_switch.get() == TREE and (self.session is None or self.session.is_finished()):
+            self._tree_step(delta)
 
     def _line_preview(self, root) -> str:
         """Notation for a variation in the Setup list: its first branch at
@@ -563,6 +902,9 @@ class OpeningDrillTab(ctk.CTkFrame):
             self.variation_listbox.insert(tk.END, label)
         self.variation_listbox.selection_set(0)
         self._download_opening_data()
+        self._tree = None                      # repertoire or its lines changed: regrow the tree
+        if self.right_switch.get() == TREE:
+            self._refresh_tree()
 
     # ---------- Lichess: real-world opponent replies ----------
 
@@ -608,6 +950,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         def on_done(fetched, error):
             self._lichess_progress = f"Couldn't download opening data: {error}" if error else None
             self._refresh_lichess_card()
+            if fetched and self._tree is not None:
+                self._update_deviations()            # new data: new wild twigs
 
         lichess_ui.downloader.start(self, self.conn, fens, on_done, on_progress)
 
@@ -715,8 +1059,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.variation_listbox.selection_set(0)
         self._begin_line("random")
 
-    def _begin_line(self, kind: str) -> None:
-        """Resets the board and panels for self.session's line and starts it."""
+    def _begin_line(self, kind: str, keep_view: bool = False) -> None:
+        """Resets the board and panels for self.session's line and starts it.
+        keep_view: stay on the current right-hand view (e.g. the Tree)."""
         name, my_color = self.session.repertoire_name, self.session.my_color
         self._line_missed = False
         self._preview_index = None
@@ -728,8 +1073,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         self._layout_buttons()
         self.move_note_label.configure(text="")
         self._render_plans(self.session.line_name, name, my_color)
-        self.right_switch.set("Plans")
-        self._show_right_view("Plans")
+        if not keep_view:
+            self.right_switch.set("Plans")
+            self._show_right_view("Plans")
         self._hide_retry_buttons()
         self.start_button.configure(
             text={"random": "New random line", "weak": "Next weak line"}.get(kind, "Drill again")
@@ -792,6 +1138,9 @@ class OpeningDrillTab(ctk.CTkFrame):
                    my_color=color)
 
     def _on_my_move_attempt(self, move: chess.Move) -> None:
+        if self._exploring():
+            self._explore_move(move)
+            return
         if self._preview_index is not None:
             self._render_board()        # viewing another position — not a drill move
             return

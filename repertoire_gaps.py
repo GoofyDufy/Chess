@@ -270,6 +270,7 @@ class PopularGap:
     opponent_score: float        # how players who choose it score
     suggestion: Optional[str] = None
     suggestion_source: str = ""  # "engine" / "lichess"
+    inside: bool = True          # False: before your opening starts (another opening; see mark_inside)
 
     @property
     def line(self) -> str:
@@ -388,3 +389,16 @@ def gap_reply_positions(gaps: List[PopularGap]) -> List[str]:
             board.push_san(s)
         fens.append(board.fen())
     return fens
+
+
+def mark_inside(gaps: List[PopularGap], starts: Dict[str, List[List[str]]]) -> None:
+    """starts: color -> each repertoire's start position as UCI moves
+    (opening_tree.start_path). A gap is inside when one of them is a prefix
+    of the moves leading to it; else it's before your openings begin."""
+    for g in gaps:
+        board, ucis = chess.Board(), []
+        for san in g.prefix:
+            move = board.parse_san(san)
+            ucis.append(move.uci())
+            board.push(move)
+        g.inside = any(len(s) <= len(ucis) and ucis[:len(s)] == s for s in starts.get(g.color, []))

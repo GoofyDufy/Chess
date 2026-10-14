@@ -26,6 +26,7 @@ import chess.engine
 import engine_locator
 import explain
 import progression
+import spot
 import stats
 import style
 import theme
@@ -45,6 +46,8 @@ TYPE_COLORS = {
 WEAK_SPOTS = "Weak spots"
 NEAR_BEST_CP = 50   # a try within half a pawn of the best move is flagged as near-best
 MAIN_LINE_PLIES = 12        # how far the step-through main line goes after your best move
+SOLUTION_DEPTH = 16         # Stockfish depth for a puzzle's forcing line (background, ~0.3 s)
+REPLY_DELAY_MS = 600        # pause before the opponent's reply in a multi-move puzzle
 MAIN_LINE_DEPTH = 18        # Stockfish depth for that line (~0.4 s; a time limit often
                             # stops mid-search and reports only a move or two)
 ALL_POSITIONS = "All positions"
@@ -125,6 +128,16 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._main_line: List[chess.Move] = []
         self._line_index = 0                      # moves of it shown on the board
         self._line_token = None
+        # multi-move puzzles: the forcing line to play (yours + replies, up to
+        # spot.MAX_SOLUTION_MOVES of yours), worked out in the background on load
+        self._solution: List[chess.Move] = []
+        self._solution_ready = False
+        self._solution_token = None
+        self._ply = 0                               # index in _solution of your next move
+        self._seq_board: Optional[chess.Board] = None
+        self._seq_missed = False                    # a miss anywhere: the puzzle isn't solved clean
+        self._run_attempt_id: Optional[int] = None  # the saved first try, for the whole sequence
+        self._pays_xp = False
         # puzzle id -> {'correct', 'near_best', 'missed'} counts over every first try
         self.records = db.puzzle_records(conn)
         self.queue: List[Puzzle] = []
@@ -486,6 +499,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._attempt_recorded = False
         self._attempt_id = None
         self._hide_main_line()
+        self._start_solution()
         self._near_best_flagged = False
         self._explain_token = None
         self.current_game = (
@@ -525,6 +539,9 @@ class PuzzleReviewTab(ctk.CTkFrame):
     def _on_move_attempt(self, move: chess.Move) -> None:
         if self.current_puzzle is None or self.attempt_state != "solving":
             return
+        if self._ply > 0:
+            self._on_sequence_move(move)
+            return
 
         board = self.board_widget.board
         played_san = board.san(move)
@@ -540,18 +557,20 @@ class PuzzleReviewTab(ctk.CTkFrame):
             # only the first try counts toward Weak spots / Progress / XP
             outcome = "correct" if correct else "near_best" if rank else "missed"
             self._save_first_try(correct, outcome)
+            self._run_attempt_id = self._attempt_id
+            self._pays_xp = pays_xp
+        if not correct:
+            self._seq_missed = True
 
         if correct:
-            self.attempt_state = "done"
-            self.solved_ids.add(self.current_puzzle.id)
-            self._refresh_listbox_row(self.queue_index)
-            bonus = (f"  Sharp position: +{progression.SHARP_BONUS_XP} XP bonus."
-                     if pays_xp and self._is_sharp() else "")
-            self.status_label.configure(text=f"Correct — {played_san}!{bonus}", text_color=theme.SUCCESS)
-            self.board_widget.set_marked_arrows(self._game_move_arrows())
-            self._set_eval(self.current_puzzle.eval_before_cp)
-            self.explanation_label.configure(text=self._explanation_text(correct=True))
-            self._explain_solution_async()
+            self._seq_board.push(move)
+            if not self._solution_ready:
+                # the forcing line is still being worked out — continue when it's ready
+                self.attempt_state = "pending"
+                self.status_label.configure(text=f"✓ {played_san} — checking whether the line continues…",
+                                            text_color=theme.SUCCESS)
+                return
+            self._after_correct(played_san)
         else:
             self.attempt_state = "wrong"
             if rank:
@@ -822,6 +841,136 @@ class PuzzleReviewTab(ctk.CTkFrame):
         text = _record_long(self.records.get(self.current_puzzle.id)) if self.current_puzzle else ""
         self.record_label.configure(text=text)
 
+    # ---------- multi-move puzzles ----------
+
+    def _start_solution(self) -> None:
+        """Works out the forcing line for this puzzle in the background. Until
+        it's known the puzzle is one move; a puzzle that isn't a forcing
+        tactic (e.g. the best move just stops a threat) stays one move."""
+        p = self.current_puzzle
+        best = chess.Move.from_uci(p.correct_move_uci)
+        token = object()
+        self._solution_token = token
+        self._solution, self._solution_ready = [best], False
+        self._ply, self._seq_board, self._seq_missed = 0, chess.Board(p.fen), False
+        self._run_attempt_id = None
+
+        def worker():
+            solution = [best]
+            engine = None
+            try:
+                path = engine_locator.find_stockfish()
+                if path:
+                    engine = chess.engine.SimpleEngine.popen_uci(path)
+                    board = chess.Board(p.fen)
+                    info = engine.analyse(board, chess.engine.Limit(depth=SOLUTION_DEPTH))
+                    pv = list(info.get("pv", []))
+                    if pv and pv[0] == best:            # the engine agrees on the first move
+                        solution = spot.solution_for(board, pv, info["score"]) or [best]
+            except Exception:
+                solution = [best]
+            finally:
+                if engine is not None:
+                    try:
+                        engine.quit()
+                    except Exception:
+                        pass
+
+            def apply():
+                if self._solution_token is not token:
+                    return
+                self._solution, self._solution_ready = solution, True
+                if self.attempt_state == "pending":         # first move already played
+                    self._after_correct(chess.Board(p.fen).san(best))
+            self._ui_queue.put(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _solution_text(self) -> str:
+        board = chess.Board(self.current_puzzle.fen)
+        sans = []
+        for move in self._solution:
+            sans.append(board.san(move))
+            board.push(move)
+        return _line_text(sans, chess.Board(self.current_puzzle.fen))
+
+    def _after_correct(self, san: str) -> None:
+        """A right move: finish the puzzle, or play the opponent's reply."""
+        if self._seq_board.is_checkmate() or self._ply + 1 >= len(self._solution):
+            self._finish_solved(san)
+            return
+        self.attempt_state = "reply"
+        self.status_label.configure(text=f"✓ {san} — keep going.", text_color=theme.SUCCESS)
+        token = self._solution_token
+        self.after(REPLY_DELAY_MS, lambda: self._play_reply(token))
+
+    def _play_reply(self, token) -> None:
+        if token is not self._solution_token or self.attempt_state != "reply":
+            return
+        reply = self._solution[self._ply + 1]
+        san = self._seq_board.san(reply)
+        self._seq_board.push(reply)
+        self.board_widget.load_fen(self._seq_board.fen())
+        self.board_widget.board = self._seq_board.copy()   # keeps the last-move highlight
+        self.board_widget.redraw()
+        self._ply += 2
+        self.attempt_state = "solving"
+        self.status_label.configure(text=f"Opponent played {san}. Your move.", text_color=theme.TEXT)
+
+    def _on_sequence_move(self, move: chess.Move) -> None:
+        """Your 2nd, 3rd or 4th move: it has to be the line's move (or mate)."""
+        board = self.board_widget.board
+        san = board.san(move)
+        after = self._seq_board.copy()
+        after.push(move)
+        board.push(move)
+        self.board_widget.redraw()
+        if move == self._solution[self._ply] or after.is_checkmate():
+            self._seq_board.push(move)
+            self._after_correct(san)
+            return
+        self._mark_sequence_missed()
+        self.attempt_state = "wrong"
+        self.status_label.configure(text=f"Not quite — {san} isn't the move; the tactic continues differently.",
+                                    text_color=theme.ERROR)
+        self.explanation_label.configure(text="")
+        self._show_retry_buttons()
+
+    def _mark_sequence_missed(self) -> None:
+        """A miss after a right first move: the saved first try becomes a miss."""
+        if self._seq_missed:
+            return
+        self._seq_missed = True
+        if self._run_attempt_id is not None:
+            db.set_attempt_result(self.conn, self._run_attempt_id, False, "missed")
+            self._count_outcome(self.current_puzzle.id, "correct", -1)
+            self._count_outcome(self.current_puzzle.id, "missed", +1)
+            progression.notify()
+
+    def _finish_solved(self, san: str) -> None:
+        self.attempt_state = "done"
+        clean = not self._seq_missed
+        if clean:
+            self.solved_ids.add(self.current_puzzle.id)
+            self._refresh_listbox_row(self.queue_index)
+        bonus = (f"  Sharp position: +{progression.SHARP_BONUS_XP} XP bonus."
+                 if clean and self._pays_xp and self._is_sharp() else "")
+        if len(self._solution) > 1:
+            text = f"Correct — the whole line: {self._solution_text()}!{bonus}"
+        else:
+            text = f"Correct — {san}!{bonus}"
+        if not clean:
+            text += "  (Found with retries — only a clean first run counts.)"
+        self.status_label.configure(text=text, text_color=theme.SUCCESS)
+        # back to the start + the best move, where the arrows and the ◀ ▶ main line begin
+        self.board_widget.load_fen(self.current_puzzle.fen)
+        self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
+        self.board_widget.redraw()
+        self.board_widget.set_marked_arrows(self._game_move_arrows())
+        self._set_eval(self.current_puzzle.eval_before_cp)
+        self.explanation_label.configure(text=self._explanation_text(correct=True))
+        self._explain_solution_async()
+
     def _on_retry(self) -> None:
         if self.current_puzzle is None:
             return
@@ -831,9 +980,12 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._near_best_flagged = False
         self.explanation_label.configure(text="")
         self._hide_retry_buttons()
-        self.board_widget.load_fen(self.current_puzzle.fen)
-        self._show_prompt()
-        self._set_eval(self.current_puzzle.eval_before_cp)
+        self.board_widget.load_fen(self._seq_board.fen())     # where this step of the line starts
+        if self._ply:
+            self.status_label.configure(text="Try again — your move.", text_color=theme.TEXT)
+        else:
+            self._show_prompt()
+            self._set_eval(self.current_puzzle.eval_before_cp)
 
     def _on_reveal(self) -> None:
         if self.current_puzzle is None:
@@ -841,15 +993,19 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.attempt_state = "done"
         if not self._attempt_recorded:   # revealed without trying = a miss
             self._save_first_try(False, "revealed")
+        self._mark_sequence_missed()
         self._attempt_id = None
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
         self.board_widget.set_marked_arrows(self._game_move_arrows())
         self._set_eval(self.current_puzzle.eval_before_cp)
-        self.status_label.configure(
-            text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
-        )
+        if len(self._solution) > 1:
+            self.status_label.configure(text=f"The solution: {self._solution_text()}.", text_color=theme.TEXT)
+        else:
+            self.status_label.configure(
+                text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
+            )
         self.explanation_label.configure(text=self._explanation_text(correct=False))
         self._explain_solution_async()
 
