@@ -20,6 +20,9 @@ mean every threshold change requires re-running Stockfish on everything.
 from __future__ import annotations
 
 import io
+import os
+import queue
+import threading
 from typing import Callable, List, Optional
 
 import chess
@@ -47,6 +50,11 @@ MATE_CP = 10000
 
 # How many top engine moves to record per position (best + 2nd + 3rd).
 MULTI_PV = 3
+
+# Games analyzed side by side, one single-threaded Stockfish each — scales
+# better than one engine with several threads. One per physical core
+# (os.cpu_count() counts hyper-threads, so halve it), at most 2.
+PARALLEL_ENGINES = max(1, min(2, (os.cpu_count() or 2) // 2))
 
 # Bump when the stored evaluation data changes shape; games cached under
 # an older version get re-analyzed once (see db.games_needing_evaluation).
@@ -168,6 +176,9 @@ def evaluate_game(
             # already decisively won or lost before this move — skip the
             # second engine call entirely; this move can never become a
             # puzzle at any threshold
+            # (don't reuse the MultiPV score when you played a top-3 move: it
+            # saves no time — this search primes the hash for the next move's
+            # — and it changes which puzzles are found)
             cp_after: Optional[int] = None
             if abs(cp_before) < DECISIVE_EVAL_CP:
                 board.push(move)
@@ -202,13 +213,59 @@ def evaluate_games_batch(
     is called as soon as each game finishes so the caller can save it
     immediately — if the run is stopped or crashes partway, every
     completed game is already cached. Returns how many games finished."""
-    finished = 0
-    with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
-        for game in games:
-            evaluations = evaluate_game(game, engine, on_move_analyzed, should_stop)
-            on_game_done(game, evaluations)
-            finished += 1
-    return finished
+    return evaluate_games_parallel(games, engine_path, on_game_done, on_move_analyzed,
+                                   should_stop, engines=1)
+
+
+def evaluate_games_parallel(
+    games: List[Game], engine_path: str,
+    on_game_done: Callable[[Game, List[MoveEvaluation]], None],
+    on_move_analyzed: Optional[Callable[[], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
+    engines: int = PARALLEL_ENGINES,
+) -> int:
+    """Like evaluate_games_batch, with `engines` Stockfish processes each
+    taking the next game from the list (newest first stays roughly in
+    order). The callbacks are never called concurrently (one lock), so the
+    caller's saving code doesn't need to be thread-safe. Raises
+    AnalysisStopped after every engine has stopped, if should_stop fired."""
+    todo: "queue.Queue[Game]" = queue.Queue()
+    for game in games:
+        todo.put(game)
+    lock = threading.Lock()
+    finished = [0]
+    errors: List[BaseException] = []
+
+    def locked_move():
+        if on_move_analyzed:
+            with lock:
+                on_move_analyzed()
+
+    def run():
+        try:
+            with chess.engine.SimpleEngine.popen_uci(engine_path) as engine:
+                while not errors:
+                    try:
+                        game = todo.get_nowait()
+                    except queue.Empty:
+                        return
+                    evaluations = evaluate_game(game, engine, locked_move, should_stop)
+                    with lock:
+                        on_game_done(game, evaluations)
+                        finished[0] += 1
+        except BaseException as e:   # AnalysisStopped too: the other engines stop at their next move
+            errors.append(e)
+
+    workers = [threading.Thread(target=run, daemon=True) for _ in range(max(1, min(engines, len(games))))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    if errors:
+        stop = next((e for e in errors if isinstance(e, AnalysisStopped)), None)
+        real = next((e for e in errors if not isinstance(e, AnalysisStopped)), None)
+        raise real or stop
+    return finished[0]
 
 
 def puzzles_from_evaluations(

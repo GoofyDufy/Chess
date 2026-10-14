@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 
 python -m pip install --quiet pyinstaller
 
-$addData = @("--add-data", "fonts;fonts")
+$addData = @("--add-data", "fonts;fonts", "--add-data", "pieces;pieces")
 if (Test-Path stockfish) {
     # bundle the engine so Puzzle Review / Play it out work out of the box
     $addData += @("--add-data", "stockfish;stockfish")

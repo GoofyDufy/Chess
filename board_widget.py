@@ -3,18 +3,44 @@
 from __future__ import annotations
 
 import tkinter as tk
-from typing import Optional
+from typing import Dict, Optional
 
 import chess
 
+from paths import resource_dir
 from theme import (
     BOARD_DARK, BOARD_HIGHLIGHT, BOARD_LIGHT, LAST_MOVE_DARK, LAST_MOVE_LIGHT,
     PANEL_BG, PIECE_BLACK_FILL, PIECE_BLACK_OUTLINE, PIECE_WHITE_FILL,
     PIECE_WHITE_OUTLINE,
 )
 
-SQUARE_SIZE = 64
+MAX_SQUARE_SIZE = 64
+MIN_SQUARE_SIZE = 40
+# window chrome (taskbar + title bar) plus everything stacked around the
+# board in a tab: header, status/explanation text, button row, card padding
+SCREEN_MARGIN = 110
+BOARD_CARD_EXTRA = 300
+
+
+def _fit_square_size() -> int:
+    """Full-size squares on big screens; smaller ones when the screen is too
+    short to fit the board card (otherwise the buttons under the board get
+    cut off, e.g. on a 1366x768 laptop)."""
+    try:
+        probe = tk.Tk()
+        probe.withdraw()
+        screen_height = probe.winfo_screenheight()
+        probe.destroy()
+    except tk.TclError:   # no display (tests) — size doesn't matter
+        return MAX_SQUARE_SIZE
+    fit = (screen_height - SCREEN_MARGIN - BOARD_CARD_EXTRA) // 8
+    return max(MIN_SQUARE_SIZE, min(MAX_SQUARE_SIZE, fit))
+
+
+SQUARE_SIZE = _fit_square_size()
 BOARD_PIXELS = SQUARE_SIZE * 8
+# drawing sizes below were tuned for 64px squares
+_SCALE = SQUARE_SIZE / MAX_SQUARE_SIZE
 LIGHT = BOARD_LIGHT
 DARK = BOARD_DARK
 HIGHLIGHT = BOARD_HIGHLIGHT
@@ -25,6 +51,24 @@ REPLY_COLOR = "#2E9B4F"        # green: the computer's best reply
 # Same unicode glyph is used for both colors — we recolor it ourselves
 # below rather than relying on the font's built-in hollow/solid styling,
 # so pieces read as "cream" vs "dark brown" like the rest of the theme.
+# Piece images: the fine-lined "cburnett" set, pre-rendered at every square
+# size (see pieces/README.md). Falls back to the unicode glyphs below if the
+# folder is missing.
+PIECE_SET = "cburnett"
+_piece_images: Dict[str, tk.PhotoImage] = {}   # kept referenced, or Tk drops them
+
+
+def _piece_image(piece: chess.Piece) -> Optional[tk.PhotoImage]:
+    name = ("w" if piece.color == chess.WHITE else "b") + piece.symbol().upper()
+    if name not in _piece_images:
+        path = resource_dir() / "pieces" / PIECE_SET / str(SQUARE_SIZE) / f"{name}.png"
+        try:
+            _piece_images[name] = tk.PhotoImage(file=str(path))
+        except tk.TclError:   # missing file
+            return None
+    return _piece_images[name]
+
+
 UNICODE_PIECES = {
     "P": "\u265F", "N": "\u265E", "B": "\u265D", "R": "\u265C", "Q": "\u265B", "K": "\u265A",
     "p": "\u265F", "n": "\u265E", "b": "\u265D", "r": "\u265C", "q": "\u265B", "k": "\u265A",
@@ -138,8 +182,9 @@ class ChessBoardWidget(tk.Canvas):
     def _draw_arrow(self, start: int, end: int, color: str, width: int = 11) -> None:
         x0, y0 = self._square_center(start)
         x1, y1 = self._square_center(end)
-        self.create_line(x0, y0, x1, y1, fill=color, width=width,
-                         arrow="last", arrowshape=(22, 26, 10), capstyle="round")
+        self.create_line(x0, y0, x1, y1, fill=color, width=round(width * _SCALE),
+                         arrow="last", arrowshape=tuple(round(n * _SCALE) for n in (22, 26, 10)),
+                         capstyle="round")
 
     def _draw_annotations(self) -> None:
         for start, end, color in self.marked_arrows:
@@ -187,14 +232,17 @@ class ChessBoardWidget(tk.Canvas):
                     )
 
                 piece = self.board.piece_at(square)
-                if piece:
+                image = _piece_image(piece) if piece else None
+                if image is not None:
+                    self.create_image(x0 + SQUARE_SIZE / 2, y0 + SQUARE_SIZE / 2, image=image)
+                elif piece:
                     symbol = UNICODE_PIECES[piece.symbol()]
                     cx, cy = x0 + SQUARE_SIZE / 2, y0 + SQUARE_SIZE / 2
                     if piece.color == chess.WHITE:
                         fill, outline = PIECE_WHITE_FILL, PIECE_WHITE_OUTLINE
                     else:
                         fill, outline = PIECE_BLACK_FILL, PIECE_BLACK_OUTLINE
-                    font = ("Arial", 38)
+                    font = ("Arial", round(38 * _SCALE))
                     # poor-man's text outline: draw the glyph offset in
                     # every direction in the outline color first, then
                     # draw it again centered in the fill color on top —
@@ -216,7 +264,7 @@ class ChessBoardWidget(tk.Canvas):
                             outline="#6B7280", width=4,
                         )
                     else:
-                        r = 9
+                        r = round(9 * _SCALE)
                         self.create_oval(
                             cx - r, cy - r, cx + r, cy + r,
                             fill="#8A8F98", outline="",

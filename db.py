@@ -101,17 +101,30 @@ CREATE TABLE IF NOT EXISTS review_state (
 -- every puzzle / opening-line attempt: drives "Weak spots" practice and
 -- the Progress dashboard. item_type 'puzzle' (item_id = puzzle id) or
 -- 'line' (item_id = the drilled line's root id); correct = first try right.
+-- outcome: 'correct' / 'near_best' (engine's 2nd/3rd choice or close to it) /
+-- 'missed' / 'revealed' (Show answer without trying); NULL on older rows.
+-- sharp: 1 if the puzzle had one clearly best move when tried (XP bonus).
 CREATE TABLE IF NOT EXISTS attempts (
     item_type TEXT,
     item_id TEXT,
     correct INTEGER,
-    attempted_at TEXT
+    attempted_at TEXT,
+    outcome TEXT,
+    sharp INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_item ON attempts (item_type, item_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
+);
+
+-- Lichess Opening Explorer answers, so each position is downloaded once
+-- (key = rating bands | speeds | position without move counters)
+CREATE TABLE IF NOT EXISTS explorer_cache (
+    key TEXT PRIMARY KEY,
+    data TEXT,
+    fetched_at TEXT
 );
 """
 
@@ -160,6 +173,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
                           ("third_move_uci", "TEXT"), ("cp_third", "INTEGER")):
         if col not in eval_cols:
             conn.execute(f"ALTER TABLE move_evaluations ADD COLUMN {col} {col_type}")
+    attempt_cols = {row["name"] for row in conn.execute("PRAGMA table_info(attempts)")}
+    if "outcome" not in attempt_cols:
+        conn.execute("ALTER TABLE attempts ADD COLUMN outcome TEXT")
+    if "sharp" not in attempt_cols:
+        conn.execute("ALTER TABLE attempts ADD COLUMN sharp INTEGER")
     existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(puzzles)")}
     if "eval_before_cp" not in existing_cols:
         conn.execute("ALTER TABLE puzzles ADD COLUMN eval_before_cp INTEGER")
@@ -419,12 +437,53 @@ def distinct_puzzle_types(conn: sqlite3.Connection) -> List[str]:
 
 # ---------- Attempts (weak spots / progress) ----------
 
-def record_attempt(conn: sqlite3.Connection, item_type: str, item_id: str, correct: bool) -> None:
-    conn.execute(
-        "INSERT INTO attempts (item_type, item_id, correct, attempted_at) VALUES (?, ?, ?, ?)",
-        (item_type, item_id, int(correct), dt.datetime.now().isoformat()),
+OUTCOMES = ("correct", "near_best", "missed", "revealed")
+
+
+def attempt_outcome(row: sqlite3.Row) -> str:
+    """Outcome of an attempts row; rows saved before outcomes existed only
+    know right/wrong."""
+    return row["outcome"] or ("correct" if row["correct"] else "missed")
+
+
+def record_attempt(conn: sqlite3.Connection, item_type: str, item_id: str, correct: bool,
+                   outcome: Optional[str] = None, sharp: bool = False) -> int:
+    """Returns the new row's id, for set_attempt_outcome. sharp is saved
+    with the try because puzzle ids change when puzzles are regenerated."""
+    cur = conn.execute(
+        "INSERT INTO attempts (item_type, item_id, correct, attempted_at, outcome, sharp) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (item_type, item_id, int(correct), dt.datetime.now().isoformat(),
+         outcome or ("correct" if correct else "missed"), int(sharp)),
     )
     conn.commit()
+    return cur.lastrowid
+
+
+def tried_today(conn: sqlite3.Connection, item_type: str, item_id: str) -> bool:
+    today = dt.date.today().isoformat()
+    return conn.execute(
+        "SELECT 1 FROM attempts WHERE item_type = ? AND item_id = ? AND substr(attempted_at, 1, 10) = ?",
+        (item_type, item_id, today),
+    ).fetchone() is not None
+
+
+def set_attempt_outcome(conn: sqlite3.Connection, attempt_id: int, outcome: str) -> None:
+    """Upgrades a saved try once the engine finishes judging it (e.g. a miss
+    that turned out to be nearly as good as the best move)."""
+    conn.execute("UPDATE attempts SET outcome = ? WHERE rowid = ?", (outcome, attempt_id))
+    conn.commit()
+
+
+def puzzle_records(conn: sqlite3.Connection) -> Dict[str, Dict[str, int]]:
+    """puzzle id -> {'correct': n, 'near_best': n, 'missed': n} over every
+    first try ever made (revealed counts as missed)."""
+    records: Dict[str, Dict[str, int]] = {}
+    for r in conn.execute("SELECT item_id, correct, outcome FROM attempts WHERE item_type = 'puzzle'"):
+        outcome = attempt_outcome(r)
+        rec = records.setdefault(r["item_id"], {"correct": 0, "near_best": 0, "missed": 0})
+        rec["missed" if outcome == "revealed" else outcome] += 1
+    return records
 
 
 def weak_item_ids(conn: sqlite3.Connection, item_type: str) -> Dict[str, float]:

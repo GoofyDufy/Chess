@@ -13,6 +13,8 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 import db
+import explorer
+import lichess_ui
 import opening_importer
 import openings_catalog
 import repertoire_gaps
@@ -27,6 +29,8 @@ from models import TIME_FILTERS as FILTERS, PlayerColor, time_class
 MIN_OPENING_GAMES = 3
 REPERTOIRE_FROM_GAMES = "From my games"
 ALL_FIRST_MOVES = "All first moves"
+GAPS_FROM_GAMES = "Gaps in your games"
+GAPS_FROM_LICHESS = "Popular on Lichess"
 BAR_WIDTH = 12
 
 
@@ -79,7 +83,7 @@ class StatsTab(ctk.CTkFrame):
 
         pages = ctk.CTkFrame(outer, fg_color="transparent")
         pages.pack(fill="both", expand=True, pady=(12, 0))
-        grid = ctk.CTkFrame(pages, fg_color="transparent")
+        grid = self._scroll_column(pages)
         style_page = ctk.CTkFrame(pages, fg_color="transparent")
         rep_page = ctk.CTkFrame(pages, fg_color="transparent")
         self._stats_pages = {"Overview": grid, "Playing style": style_page, "Repertoire": rep_page}
@@ -88,32 +92,33 @@ class StatsTab(ctk.CTkFrame):
         self.page_switch.set("Overview")
         self._show_stats_page("Overview")
 
-        grid.columnconfigure((0, 1), weight=1, uniform="col")
-        grid.rowconfigure((0, 1), weight=1, uniform="row")
-
         self.openings_tree = self._section(
             grid, 0, 0, "Results by opening",
             f"Openings with {MIN_OPENING_GAMES}+ games. Click a column to sort.",
             [("opening", "Opening", 190), ("color", "As", 50), ("games", "Games", 55),
              ("wdl", "W / D / L", 85), ("score", "Score", 55), ("bar", "", 110)],
+            rows=12,
         )
         self.losses_tree = self._section(
-            grid, 0, 1, "How you lose",
+            grid, 1, 0, "How you lose",
             "Lots of timeouts means clock trouble, not chess trouble.",
             [("tc", "Time control", 95), ("lost", "Losses", 60), ("resigned", "Resigned", 75),
              ("mated", "Mated", 60), ("timeout", "Timeout", 70), ("other", "Other", 55)],
+            rows=4,
         )
         self.phase_tree = self._section(
-            grid, 1, 0, "Accuracy by game phase",
+            grid, 2, 0, "Accuracy by game phase",
             "Average pawns lost per move (lower is better). Stockfish-analyzed games only.",
             [("phase", "Phase", 100), ("moves", "Moves", 65), ("avg", "Avg loss", 75),
              ("blunders", "Blunders", 75), ("bar", "", 110)],
+            rows=3,
         )
         self.clock_tree = self._section(
-            grid, 1, 1, "Blunders vs. time left",
+            grid, 3, 0, "Blunders vs. time left",
             f"Share of moves losing {stats.BLUNDER_CP // 100}+ pawns, by clock remaining.",
             [("clock", "Time left", 95), ("moves", "Moves", 65), ("rate", "Blunder rate", 95),
              ("bar", "", 110)],
+            rows=5,
         )
 
     def _build_style_page(self, page) -> None:
@@ -127,34 +132,36 @@ class StatsTab(ctk.CTkFrame):
         self.style_note_label = theme.label(verdict, "", "muted", wraplength=900)
         self.style_note_label.pack(anchor="w", fill="x", pady=(2, 0))
 
-        grid = ctk.CTkFrame(page, fg_color="transparent")
+        grid = self._scroll_column(page)
         grid.pack(fill="both", expand=True, pady=(12, 0))
-        grid.columnconfigure((0, 1), weight=1, uniform="col")
-        grid.rowconfigure((0, 1), weight=1, uniform="row")
 
         self.indicators_tree = self._section(
             grid, 0, 0, "Tactical indicators",
             "Sharp = the engine saw one clearly best move. Everyone loses more in sharp "
             "positions, so compare these over time rather than to each other.",
             [("metric", "Measure", 220), ("value", "Value", 90), ("basis", "Based on", 110)],
+            rows=6,
         )
         self.game_types_tree = self._section(
-            grid, 0, 1, "Results by game type",
+            grid, 1, 0, "Results by game type",
             "Your score by the kind of game it turned into (sharp/quiet split at your own averages).",
             [("type", "Game type", 175), ("games", "Games", 55), ("wdl", "W / D / L", 85),
              ("score", "Score", 55), ("bar", "", 110)],
+            rows=8,
         )
         self.opening_char_tree = self._section(
-            grid, 1, 0, "Your openings' character",
+            grid, 2, 0, "Your openings' character",
             f"How sharp your games with each opening get (moves 9–30). {MIN_OPENING_GAMES}+ analyzed games.",
             [("opening", "Opening", 180), ("color", "As", 50), ("games", "Games", 55),
              ("score", "Score", 55), ("character", "Character", 85)],
+            rows=12,
         )
         self.recommend_tree = self._section(
-            grid, 1, 1, "Openings that fit your style",
+            grid, 3, 0, "Openings that fit your style",
             "Double-click one (or select it and click Drill) to practice it in Opening Drill.",
             [("opening", "Opening", 190), ("color", "As", 50), ("character", "Style", 75),
              ("fit", "Fit", 85), ("you", "You", 75)],
+            rows=10,
         )
         self.recommend_tree.bind("<Double-1>", lambda e: self._drill_selected())
         theme.button(self.recommend_tree.master.master, "Drill selected opening",
@@ -179,6 +186,17 @@ class StatsTab(ctk.CTkFrame):
                                                  lambda _: self._render_repertoire(), width=180)
         self.first_move_menu.pack(side="right")
         theme.label(note_row, "First move", "muted").pack(side="right", padx=(0, 8))
+        # which gaps fill the top table: from your own games, or popular Lichess
+        # moves your prep doesn't answer (even ones your opponents haven't tried yet)
+        self.gap_source = ctk.CTkSegmentedButton(
+            note_row, values=[GAPS_FROM_GAMES, GAPS_FROM_LICHESS], command=lambda _: self._show_gap_source(),
+            height=30, font=theme.FONT_BOLD, fg_color=theme.PANEL_BG,
+            selected_color=theme.CONTROL_BG, selected_hover_color=theme.CONTROL_BG,
+            unselected_color=theme.PANEL_BG, unselected_hover_color=theme.PANEL_ALT,
+            text_color=theme.TEXT,
+        )
+        self.gap_source.set(GAPS_FROM_GAMES)
+        self.gap_source.pack(side="left", padx=(0, 12))
         self.rep_note_label = theme.label(note_row, "", "muted", wraplength=640)
         self.rep_note_label.pack(side="left", fill="x", expand=True)
         self._rep_report = None
@@ -194,13 +212,24 @@ class StatsTab(ctk.CTkFrame):
              ("who", "Who left", 120), ("games", "Games", 60), ("score", "Score", 60),
              ("reply", "Suggested reply", 160)],
         )
+        self.popular_tree = self._section(
+            grid, 0, 0, "Popular moves your prep doesn't answer",
+            "Moves Lichess players at your level often choose at positions in your repertoire, "
+            "with no reply in your lines yet — most likely to face first. Select one and click Add.",
+            [("type", "Line (unanswered move last)", 330), ("color", "As", 55),
+             ("faced", "You'd face it", 100), ("share", "Played here", 90), ("score", "They score", 80),
+             ("reply", "Suggested reply", 160)],
+        )
+        self._card_of(self.popular_tree).grid_remove()
+        self._popular: List[repertoire_gaps.PopularGap] = []
+        self._popular_status: Optional[str] = None
         self.common_tree = self._section(
             grid, 1, 0, "Lines you face most (first 3 moves)",
             "Your most common openings. ✓ = already covered by your repertoire.",
             [("type", "Line", 330), ("opening", "Opening", 260), ("color", "As", 55),
              ("games", "Games", 60), ("score", "Score", 60), ("rep", "In rep", 60)],
         )
-        for tree in (self.gaps_tree, self.common_tree):
+        for tree in (self.gaps_tree, self.popular_tree, self.common_tree):
             row = ctk.CTkFrame(tree.master.master, fg_color="transparent")
             row.pack(fill="x", pady=(8, 0))
             theme.button(row, "Add selected to repertoire", lambda t=tree: self._add_selected_to_repertoire(t),
@@ -209,6 +238,65 @@ class StatsTab(ctk.CTkFrame):
                 side="right", padx=(0, 8))
             tree.bind("<Double-1>", lambda e, t=tree: self._show_games(t))
         self._rep_items = {}
+
+    @staticmethod
+    def _card_of(tree: ttk.Treeview):
+        return tree.master.master.master    # body -> inner -> card (see _section)
+
+    def _show_gap_source(self) -> None:
+        lichess = self.gap_source.get() == GAPS_FROM_LICHESS
+        self._card_of(self.gaps_tree if lichess else self.popular_tree).grid_remove()
+        self._card_of(self.popular_tree if lichess else self.gaps_tree).grid()
+        if lichess:
+            self._refresh_popular()
+        else:
+            self._render_repertoire()
+
+    def _refresh_popular(self) -> None:
+        """Popular-gap list from cached Lichess data, downloading what's
+        missing in the background first (then the reply positions, so
+        suggestions can come from Lichess too)."""
+        if not explorer.get_token(self.conn):
+            self._popular, self._popular_status = [], (
+                "Connect Lichess (Opening Drill → Add lines → Connect Lichess...) to see which "
+                "popular moves your repertoire doesn't answer.")
+            self._render_repertoire()
+            return
+        if not explorer.opponent_positions(self.conn):
+            self._popular, self._popular_status = [], (
+                "Add some lines in Opening Drill first: this checks every position in your "
+                "repertoire against what Lichess players actually play.")
+            self._render_repertoire()
+            return
+
+        def progress(done, total):
+            self._popular_status = f"Downloading Lichess opening data: {done} / {total} positions…"
+            self._render_repertoire()
+
+        def compute():
+            bands = explorer.rating_bands(self.conn)
+            self._popular = repertoire_gaps.popular_gaps(
+                self.conn, lambda fen: explorer.cached(self.conn, fen, bands))
+
+        def after_positions(fetched, error):
+            if error:
+                self._popular_status = f"Couldn't download Lichess data: {error}"
+                compute()
+                self._render_repertoire()
+                return
+            compute()
+            lichess_ui.downloader.start(self, self.conn, repertoire_gaps.gap_reply_positions(self._popular),
+                                        after_replies, progress)
+
+        def after_replies(fetched, error):
+            self._popular_status = f"Couldn't download Lichess data: {error}" if error else None
+            compute()
+            self._render_repertoire()
+
+        compute()
+        self._render_repertoire()
+        lichess_ui.downloader.start(self, self.conn, explorer.opponent_positions(self.conn),
+                                    after_positions, progress)
 
     def _refresh_repertoire(self) -> None:
         self.configure(cursor="watch")
@@ -229,7 +317,10 @@ class StatsTab(ctk.CTkFrame):
             self.first_move_var.set(ALL_FIRST_MOVES)
         elif current:
             self.first_move_var.set(next(o for o in options if o.startswith(f"1.{current} ")))
-        self._render_repertoire()
+        if self.gap_source.get() == GAPS_FROM_LICHESS:
+            self._refresh_popular()      # renders when done
+        else:
+            self._render_repertoire()
 
     def _selected_first_move(self) -> Optional[str]:
         """'1.e4  (1210)' -> 'e4'; None for all first moves."""
@@ -247,7 +338,7 @@ class StatsTab(ctk.CTkFrame):
         def starts_with(sans: List[str]) -> bool:
             return first is None or (bool(sans) and sans[0] == first)
 
-        for tree in (self.gaps_tree, self.common_tree):
+        for tree in (self.gaps_tree, self.popular_tree, self.common_tree):
             tree.delete(*tree.get_children())
         self._rep_items = {}
 
@@ -256,7 +347,22 @@ class StatsTab(ctk.CTkFrame):
         if missing:
             note += (f" You have no {' or '.join(missing)} repertoire yet, so those games only "
                      "appear under Lines you face most — add the most common ones from there.")
+        if self.gap_source.get() == GAPS_FROM_LICHESS:
+            bands = explorer.rating_bands(self.conn)
+            note = self._popular_status or (
+                f"{len(self._popular)} popular move(s) without an answer in your repertoire "
+                f"(Lichess blitz/rapid, players {explorer.describe_bands(bands)}).")
         self.rep_note_label.configure(text=note)
+
+        popular = [g for g in self._popular if starts_with(g.prefix + [g.move])]
+        for i, g in enumerate(popular):
+            iid = f"popular{i}"
+            self._rep_items[iid] = g
+            reply = f"{g.suggestion} ({g.suggestion_source})" if g.suggestion else "–"
+            self.popular_tree.insert("", "end", iid=iid, values=(
+                g.line, g.color.capitalize(), f"{100 * g.frequency:.1f}%", f"{100 * g.share:.0f}%",
+                f"{100 * g.opponent_score:.0f}%", reply,
+            ))
 
         gaps = [g for g in r.gaps if r.has_repertoire[g.color] and starts_with(g.prefix + [g.move])]
         for i, g in enumerate(gaps):
@@ -285,6 +391,10 @@ class StatsTab(ctk.CTkFrame):
             messagebox.showinfo("Nothing selected", "Select a line in the table first.", parent=self)
             return
         item = self._rep_items[selection[0]]
+        if isinstance(item, repertoire_gaps.PopularGap):
+            messagebox.showinfo("From Lichess", "This move comes from Lichess players, not from your "
+                                "own games, so there are no games of yours to show.", parent=self)
+            return
         if isinstance(item, repertoire_gaps.Gap):
             title, fen = item.line, item.review_fen
         else:
@@ -341,6 +451,9 @@ class StatsTab(ctk.CTkFrame):
             return
         item = self._rep_items[selection[0]]
         color = PlayerColor(item.color)
+        if isinstance(item, repertoire_gaps.PopularGap):
+            item = item.as_gap()
+            item.opening = "Lichess"
         if isinstance(item, repertoire_gaps.Gap):
             name = f"{item.opening} — {item.line}"
             pgn = repertoire_gaps.gap_pgn(item, name[:90])
@@ -414,25 +527,36 @@ class StatsTab(ctk.CTkFrame):
                 f"{100 * rec.score:.0f}% ({rec.games})" if rec else "new",
             ))
 
-    def _section(self, parent, row, col, title, help_text, columns) -> ttk.Treeview:
+    @staticmethod
+    def _scroll_column(parent) -> ctk.CTkScrollableFrame:
+        """One full-width column of sections that scrolls (easier to read
+        than a 2x2 grid of narrow tables)."""
+        column = ctk.CTkScrollableFrame(parent, fg_color="transparent",
+                                        scrollbar_button_color=theme.CONTROL_BG,
+                                        scrollbar_button_hover_color=theme.BORDER_STRONG)
+        column.columnconfigure(0, weight=1)
+        return column
+
+    def _section(self, parent, row, col, title, help_text, columns, rows: int = 6) -> ttk.Treeview:
         frame = theme.card(parent)
         frame.grid(row=row, column=col, sticky="nsew",
                    padx=(0, 8) if col == 0 else (8, 0), pady=(0, 8) if row == 0 else (8, 0))
         inner = ctk.CTkFrame(frame, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=16, pady=14)
         theme.label(inner, title, "heading").pack(anchor="w")
-        theme.label(inner, help_text, "muted", wraplength=440).pack(anchor="w", fill="x", pady=(0, 8))
+        theme.label(inner, help_text, "muted", wraplength=900).pack(anchor="w", fill="x", pady=(0, 8))
 
         body = ctk.CTkFrame(inner, fg_color="transparent")
         body.pack(fill="both", expand=True)
-        tree = ttk.Treeview(body, columns=[c[0] for c in columns], show="headings", height=6)
+        tree = ttk.Treeview(body, columns=[c[0] for c in columns], show="headings", height=rows)
         for key, heading, width in columns:
             tree.heading(key, text=heading, command=lambda k=key, t=tree: self._sort(t, k))
             tree.column(key, width=width,
                         anchor="w" if key in ("opening", "bar", "metric", "type") else "center",
                         stretch=key in ("opening", "metric", "type"))
+        # small minimum height: the default (200 px) stretched short tables
         scroll = ctk.CTkScrollbar(body, command=tree.yview, button_color=theme.CONTROL_BG,
-                                  fg_color="transparent")
+                                  fg_color="transparent", height=40)
         tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="left", fill="y")

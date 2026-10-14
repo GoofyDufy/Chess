@@ -8,6 +8,7 @@ just re-filters the cache and is instant."""
 from __future__ import annotations
 
 import queue
+import random
 import threading
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -24,6 +25,7 @@ import chess.engine
 
 import engine_locator
 import explain
+import progression
 import stats
 import style
 import theme
@@ -42,6 +44,9 @@ TYPE_COLORS = {
 
 WEAK_SPOTS = "Weak spots"
 NEAR_BEST_CP = 50   # a try within half a pawn of the best move is flagged as near-best
+MAIN_LINE_PLIES = 12        # how far the step-through main line goes after your best move
+MAIN_LINE_DEPTH = 18        # Stockfish depth for that line (~0.4 s; a time limit often
+                            # stops mid-search and reports only a move or two)
 ALL_POSITIONS = "All positions"
 SHARP_ONLY = "Sharp (one best move)"
 QUIET_ONLY = "Quiet (several good moves)"
@@ -69,6 +74,36 @@ def _cp_to_pawns(cp: Optional[int]) -> str:
     return f"{sign}{pawns:.1f}"
 
 
+def _line_text(sans: List[str], start: chess.Board) -> str:
+    """'24. Qxd5 Nxd5 25. Bb5+' — numbered from the puzzle position."""
+    parts, number, white = [], start.fullmove_number, start.turn == chess.WHITE
+    for i, san in enumerate(sans):
+        if white:
+            parts.append(f"{number}. {san}")
+        else:
+            parts.append(f"{number}... {san}" if i == 0 else san)
+            number += 1
+        white = not white
+    return " ".join(parts)
+
+
+def _record_short(rec: Optional[dict]) -> str:
+    """Queue-row tally of every first try, e.g. '✓2 ◐1 ✗1'."""
+    if not rec:
+        return ""
+    parts = [f"{mark}{rec[key]}" for key, mark in (("correct", "✓"), ("near_best", "◐"), ("missed", "✗"))
+             if rec[key]]
+    return " ".join(parts)
+
+
+def _record_long(rec: Optional[dict]) -> str:
+    if not rec or not sum(rec.values()):
+        return "First time on this puzzle"
+    tries = sum(rec.values())
+    return (f"Your record: {tries} {'try' if tries == 1 else 'tries'} — ✓ {rec['correct']} correct · "
+            f"◐ {rec['near_best']} near-best · ✗ {rec['missed']} missed")
+
+
 def _swing_text(p: Puzzle) -> str:
     """Short label for how costly the mistake was, e.g. '-1.5' or 'allowed mate'."""
     if p.eval_after_cp is not None and p.eval_after_cp <= -analyzer.MATE_CP:
@@ -85,6 +120,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         # on_review_game(game_id, fen): open Game Review at that position
         self.on_review_game = on_review_game
         self._attempt_recorded = False
+        self._attempt_id: Optional[int] = None   # saved first try, while it can still be upgraded
+        # step-through main line once solved / revealed: best move + engine continuation
+        self._main_line: List[chess.Move] = []
+        self._line_index = 0                      # moves of it shown on the board
+        self._line_token = None
+        # puzzle id -> {'correct', 'near_best', 'missed'} counts over every first try
+        self.records = db.puzzle_records(conn)
         self.queue: List[Puzzle] = []
         self.queue_index: int = -1
         self.current_puzzle: Optional[Puzzle] = None
@@ -93,6 +135,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         # "done" -> solved or revealed, waiting for Next
         self.attempt_state: str = "solving"
         self.solved_ids: set[str] = set()   # solved on the first try this session
+        self.seen_ids: set[str] = set()     # shown this session — Random prefers unseen ones
 
         # Background threads (import/analyze) must never call Tk methods
         # directly — not even self.after(), which itself isn't safe to
@@ -139,6 +182,9 @@ class PuzzleReviewTab(ctk.CTkFrame):
             side="right", padx=(0, 6))
         self.game_label = theme.label(header, "", "muted", wraplength=300)
         self.game_label.pack(side="left", fill="x")
+        # your history on this puzzle: every first try, right / near-best / missed
+        self.record_label = theme.label(board_pad, "", "muted", wraplength=BOARD_PIXELS)
+        self.record_label.pack(anchor="w", pady=(0, 6))
 
         board_row = ctk.CTkFrame(board_pad, fg_color="transparent")
         board_row.pack()
@@ -147,20 +193,27 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget = ChessBoardWidget(board_row, self._on_move_attempt, bg=theme.PANEL_BG)
         self.board_widget.pack(side="left")
 
-        self.status_label = theme.label(board_pad, "", "status", wraplength=BOARD_PIXELS)
-        self.status_label.pack(pady=(12, 0), anchor="w")
-        self.explanation_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
-        self.explanation_label.pack(pady=(2, 0), anchor="w")
-
+        # buttons right under the board, text below them: a long explanation can
+        # then never push the buttons off a short screen
         button_row = ctk.CTkFrame(board_pad, fg_color="transparent")
-        button_row.pack(pady=(12, 0), fill="x")
-        self.prev_button = theme.button(button_row, "← Previous", self._go_previous, width=112)
+        button_row.pack(pady=(10, 0), fill="x")
+        self.prev_button = theme.button(button_row, "← Prev", self._go_previous, width=88)
         self.prev_button.pack(side="left")
+        # step through the main line (packed once the puzzle is solved or revealed)
+        self.line_back_button = theme.button(button_row, "◀", lambda: self._step_line(-1), width=36)
+        self.line_fwd_button = theme.button(button_row, "▶", lambda: self._step_line(+1), width=36)
         self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
         self.reveal_button = theme.button(button_row, "Show answer", self._on_reveal, width=120)
         # retry/reveal are packed only after a wrong attempt
-        self.next_button = theme.button(button_row, "Next puzzle →", self._go_next, "primary", width=140)
+        self.next_button = theme.button(button_row, "Next →", self._go_next, "primary", width=104)
         self.next_button.pack(side="right")
+        self.random_button = theme.button(button_row, "Random", self._go_random, width=92)
+        self.random_button.pack(side="right", padx=(0, 6))
+
+        self.status_label = theme.label(board_pad, "", "status", wraplength=BOARD_PIXELS)
+        self.status_label.pack(pady=(10, 0), anchor="w")
+        self.explanation_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
+        self.explanation_label.pack(pady=(2, 0), anchor="w")
 
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
@@ -215,6 +268,18 @@ class PuzzleReviewTab(ctk.CTkFrame):
             theme.label(settings, text).grid(row=row, column=0, sticky="w", pady=3)
             theme.entry(settings, var, width=64).grid(row=row, column=1, sticky="w", padx=10, pady=3)
             theme.label(settings, hint, "muted").grid(row=row, column=2, sticky="w", pady=3)
+
+        # one Stockfish per CPU core, games side by side (~1.7x faster on 2 cores)
+        self.parallel_var = tk.BooleanVar(value=db.get_setting(self.conn, "parallel_engines") != "0")
+        if analyzer.PARALLEL_ENGINES > 1:
+            ctk.CTkCheckBox(
+                games, text="Use both CPU cores (faster; the laptop runs warmer)",
+                variable=self.parallel_var, font=theme.FONT_SMALL, text_color=theme.TEXT_SOFT,
+                fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, border_color=theme.BORDER_STRONG,
+                checkbox_width=18, checkbox_height=18,
+                command=lambda: db.set_setting(self.conn, "parallel_engines",
+                                               "1" if self.parallel_var.get() else "0"),
+            ).pack(anchor="w", pady=(10, 0))
 
         self.analyze_button = theme.button(games, "Analyze new games", self._analyze_games, "primary")
         self.analyze_button.pack(fill="x", pady=(12, 6))
@@ -344,6 +409,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.current_game = None
             self.board_widget.clear()
             self.game_label.configure(text="")
+            self.record_label.configure(text="")
             self.status_label.configure(text=empty_text, text_color=theme.TEXT_MUTED)
             self.explanation_label.configure(text="")
             self._hide_retry_buttons()
@@ -351,7 +417,9 @@ class PuzzleReviewTab(ctk.CTkFrame):
     def _listbox_label(self, index: int) -> str:
         p = self.queue[index]
         check = "✓ " if p.id in self.solved_ids else "   "
-        return f"{check}{index + 1}.  {p.puzzle_type or 'Puzzle'}  ({_swing_text(p)})"
+        record = _record_short(self.records.get(p.id))
+        return (f"{check}{index + 1}.  {p.puzzle_type or 'Puzzle'}  ({_swing_text(p)})"
+                + (f"   {record}" if record else ""))
 
     def _refresh_listbox(self) -> None:
         self.queue_listbox.delete(0, tk.END)
@@ -398,13 +466,26 @@ class PuzzleReviewTab(ctk.CTkFrame):
             return
         self._load_puzzle_at((self.queue_index - 1) % len(self.queue))
 
+    def _go_random(self) -> None:
+        """Jumps to a random puzzle in the queue, preferring ones not yet
+        shown this session; once every puzzle has been seen, any puzzle
+        other than the current one."""
+        if not self.queue:
+            return
+        others = [i for i in range(len(self.queue)) if i != self.queue_index] or [self.queue_index]
+        unseen = [i for i in others if self.queue[i].id not in self.seen_ids]
+        self._load_puzzle_at(random.choice(unseen or others))
+
     def _load_puzzle_at(self, index: int) -> None:
         self.attempt_state = "solving"
         self._hide_retry_buttons()
         self.explanation_label.configure(text="")
         self.queue_index = index
         self.current_puzzle = self.queue[index]
+        self.seen_ids.add(self.current_puzzle.id)
         self._attempt_recorded = False
+        self._attempt_id = None
+        self._hide_main_line()
         self._near_best_flagged = False
         self._explain_token = None
         self.current_game = (
@@ -415,6 +496,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         # puzzle positions are always your move — show the board from your side
         self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
         self.game_label.configure(text=self._game_label_text())
+        self._update_record_label()
         self._show_prompt()
         self._set_eval(self.current_puzzle.eval_before_cp)
 
@@ -447,26 +529,31 @@ class PuzzleReviewTab(ctk.CTkFrame):
         board = self.board_widget.board
         played_san = board.san(move)
         correct = move.uci() == self.current_puzzle.correct_move_uci
+        rank, cp_alt = (None, None) if correct else self._engine_rank(move)
 
         board.push(move)
         self.board_widget.redraw()
-        if not self._attempt_recorded:
-            # only the first try counts toward Weak spots / Progress
-            db.record_attempt(self.conn, "puzzle", self.current_puzzle.id, correct)
-            self._attempt_recorded = True
+        first_try = not self._attempt_recorded
+        # XP is paid once per puzzle per day — only promise a bonus that's real
+        pays_xp = first_try and not db.tried_today(self.conn, "puzzle", self.current_puzzle.id)
+        if first_try:
+            # only the first try counts toward Weak spots / Progress / XP
+            outcome = "correct" if correct else "near_best" if rank else "missed"
+            self._save_first_try(correct, outcome)
 
         if correct:
             self.attempt_state = "done"
             self.solved_ids.add(self.current_puzzle.id)
             self._refresh_listbox_row(self.queue_index)
-            self.status_label.configure(text=f"Correct — {played_san}!", text_color=theme.SUCCESS)
+            bonus = (f"  Sharp position: +{progression.SHARP_BONUS_XP} XP bonus."
+                     if pays_xp and self._is_sharp() else "")
+            self.status_label.configure(text=f"Correct — {played_san}!{bonus}", text_color=theme.SUCCESS)
             self.board_widget.set_marked_arrows(self._game_move_arrows())
             self._set_eval(self.current_puzzle.eval_before_cp)
             self.explanation_label.configure(text=self._explanation_text(correct=True))
             self._explain_solution_async()
         else:
             self.attempt_state = "wrong"
-            rank, cp_alt = self._engine_rank(move)
             if rank:
                 self._flag_near_best(played_san, f"the engine's {rank} choice")
                 if cp_alt is not None:
@@ -492,9 +579,81 @@ class PuzzleReviewTab(ctk.CTkFrame):
         except ValueError:
             game_move = None
         summary = self._eval_summary()
+        self._load_main_line(p.fen, best)
         self.explanation_label.configure(text="Working out the key line…")
         self._explain_async(lambda engine: explain.explain_solution(p.fen, best, game_move, engine)
                             + (f"\n{summary}" if summary else ""))
+
+    # ---------- step-through main line ----------
+
+    def _load_main_line(self, fen: str, best: chess.Move) -> None:
+        """Shows ◀ ▶ right away (best move only), then fetches Stockfish's
+        continuation in the background and extends the line."""
+        token = object()
+        self._line_token = token
+        self._main_line, self._line_index = [best], 1      # the board already shows the best move
+        self.line_back_button.pack(side="left", padx=(8, 0))
+        self.line_fwd_button.pack(side="left", padx=(6, 0))
+        self._update_line_buttons()
+
+        def worker():
+            line: List[chess.Move] = []
+            engine = None
+            try:
+                path = engine_locator.find_stockfish()
+                if path:
+                    engine = chess.engine.SimpleEngine.popen_uci(path)
+                    board = chess.Board(fen)
+                    board.push(best)
+                    if not board.is_game_over():
+                        info = engine.analyse(board, chess.engine.Limit(depth=MAIN_LINE_DEPTH))
+                        line = list(info.get("pv", []))[:MAIN_LINE_PLIES]
+            except Exception:
+                line = []
+            finally:
+                if engine is not None:
+                    try:
+                        engine.quit()
+                    except Exception:
+                        pass
+
+            def apply():
+                if self._line_token is token and line:
+                    self._main_line = [best] + line
+                    self._update_line_buttons()
+            self._ui_queue.put(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _hide_main_line(self) -> None:
+        self._line_token = None
+        self._main_line, self._line_index = [], 0
+        self.line_back_button.pack_forget()
+        self.line_fwd_button.pack_forget()
+
+    def _update_line_buttons(self) -> None:
+        self.line_back_button.configure(state="normal" if self._line_index > 0 else "disabled")
+        self.line_fwd_button.configure(
+            state="normal" if self._line_index < len(self._main_line) else "disabled")
+
+    def _step_line(self, delta: int) -> None:
+        if self.current_puzzle is None or self.attempt_state != "done" or not self._main_line:
+            return
+        self._line_index = max(0, min(len(self._main_line), self._line_index + delta))
+        self.board_widget.load_fen(self.current_puzzle.fen)
+        board = self.board_widget.board
+        sans = []
+        for move in self._main_line[:self._line_index]:
+            sans.append(board.san(move))
+            board.push(move)
+        self.board_widget.redraw()
+        self._update_line_buttons()
+        start = chess.Board(self.current_puzzle.fen)
+        text = _line_text(sans, start) if sans else "the puzzle position"
+        more = " …" if self._line_index < len(self._main_line) else ""
+        self.status_label.configure(
+            text=f"Main line ({self._line_index}/{len(self._main_line)}): {text}{more}",
+            text_color=theme.TEXT)
 
     def _explain_async(self, job) -> None:
         """Runs job(engine) on a background thread with a short-lived
@@ -597,6 +756,12 @@ class PuzzleReviewTab(ctk.CTkFrame):
             attempt = self.board_widget.board.move_stack[-1] if self.board_widget.board.move_stack else None
             san = board.san(attempt) if attempt is not None and attempt in board.legal_moves else "That"
             self._flag_near_best(san, f"almost as good as the best move (only {max(gap, 0) / 100:.1f} worse)")
+            if self._attempt_id is not None:   # it was your first try: save it as near-best
+                db.set_attempt_outcome(self.conn, self._attempt_id, "near_best")
+                self._attempt_id = None
+                self._count_outcome(p.id, "missed", -1)
+                self._count_outcome(p.id, "near_best", +1)
+                progression.notify()
 
     def _game_move_arrows(self):
         """Blue arrow for the move you played in the game - only once you've
@@ -636,11 +801,33 @@ class PuzzleReviewTab(ctk.CTkFrame):
         if self.on_review_game:
             self.on_review_game(self.current_puzzle.source_game_id, self.current_puzzle.fen)
 
+    def _save_first_try(self, correct: bool, outcome: str) -> None:
+        pid = self.current_puzzle.id
+        self._attempt_id = db.record_attempt(self.conn, "puzzle", pid, correct, outcome,
+                                             sharp=self._is_sharp())
+        self._attempt_recorded = True
+        self._count_outcome(pid, outcome, +1)
+        progression.notify()
+
+    def _is_sharp(self) -> bool:
+        return style.puzzle_sharpness(self.conn, [self.current_puzzle]).get(self.current_puzzle.id, False)
+
+    def _count_outcome(self, puzzle_id: str, outcome: str, delta: int) -> None:
+        rec = self.records.setdefault(puzzle_id, {"correct": 0, "near_best": 0, "missed": 0})
+        rec["missed" if outcome == "revealed" else outcome] += delta
+        self._refresh_listbox_row(self.queue_index)
+        self._update_record_label()
+
+    def _update_record_label(self) -> None:
+        text = _record_long(self.records.get(self.current_puzzle.id)) if self.current_puzzle else ""
+        self.record_label.configure(text=text)
+
     def _on_retry(self) -> None:
         if self.current_puzzle is None:
             return
         self.attempt_state = "solving"
         self._explain_token = None
+        self._attempt_id = None        # retries never change the saved first try
         self._near_best_flagged = False
         self.explanation_label.configure(text="")
         self._hide_retry_buttons()
@@ -653,8 +840,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
             return
         self.attempt_state = "done"
         if not self._attempt_recorded:   # revealed without trying = a miss
-            db.record_attempt(self.conn, "puzzle", self.current_puzzle.id, False)
-            self._attempt_recorded = True
+            self._save_first_try(False, "revealed")
+        self._attempt_id = None
         self._hide_retry_buttons()
         self.board_widget.load_fen(self.current_puzzle.fen)
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
@@ -848,17 +1035,20 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._stop_event.clear()
         self._set_busy(True)
         self._show_progress("Preparing...", maximum=1, stoppable=True)
+        # read Tk state here: the worker thread must never touch Tk
+        engines = analyzer.PARALLEL_ENGINES if self.parallel_var.get() else 1
 
         def worker():
             try:
-                self._run_analysis(games, stockfish_path, threshold_cp)
+                self._run_analysis(games, stockfish_path, threshold_cp, engines)
             except Exception as e:
                 msg = str(e)
                 self._ui_queue.put(lambda: self._on_analysis_error(msg))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _run_analysis(self, games: List[Game], stockfish_path: str, threshold_cp: int) -> None:
+    def _run_analysis(self, games: List[Game], stockfish_path: str, threshold_cp: int,
+                      engines: int = 1) -> None:
         """Runs on a background thread. Each game's engine output is saved
         (and its puzzles generated) the moment it finishes, so stopping or
         closing the app mid-run loses at most the game in progress. UI
@@ -868,7 +1058,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         progress = {"moves": 0, "games": 0, "puzzles": 0}
 
         def progress_text() -> str:
-            return (f"Game {min(progress['games'] + 1, game_count)} of {game_count} · "
+            return (f"{progress['games']} of {game_count} games done · "
                     f"{progress['moves']} / {total_moves} moves")
 
         self._ui_queue.put(lambda: self._show_progress(progress_text(), total_moves, stoppable=True))
@@ -887,9 +1077,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         stopped = False
         try:
-            analyzer.evaluate_games_batch(
+            analyzer.evaluate_games_parallel(
                 games, stockfish_path, on_game_done,
                 on_move_analyzed=on_move_analyzed, should_stop=self._stop_event.is_set,
+                engines=engines,
             )
         except analyzer.AnalysisStopped:
             stopped = True

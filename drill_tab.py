@@ -14,15 +14,20 @@ from typing import Optional
 import chess
 
 import db
+import explorer
+import lichess_ui
 import random
 
 import opening_importer
 import opening_notes
+import progression
 from play_window import PlayWindow
 import theme
 from board_widget import BOARD_PIXELS, ChessBoardWidget
 from drill import DrillResult, OpeningDrillSession, format_move_list
 from models import PlayerColor
+
+ADD_LINES = "Add lines"
 
 
 class OpeningDrillTab(ctk.CTkFrame):
@@ -33,6 +38,13 @@ class OpeningDrillTab(ctk.CTkFrame):
 
         self._build_layout()
         self._refresh_repertoire_list()
+        top = self.winfo_toplevel()
+        top.bind("<Left>", lambda e: self._on_arrow_key(-1), add="+")
+        top.bind("<Right>", lambda e: self._on_arrow_key(+1), add="+")
+        if not self._repertoire_labels:
+            # nothing to drill yet — open on the import buttons
+            self.right_switch.set(ADD_LINES)
+            self._show_right_view(ADD_LINES)
 
     def _build_layout(self) -> None:
         left = theme.card(self)
@@ -40,8 +52,16 @@ class OpeningDrillTab(ctk.CTkFrame):
         board_pad = ctk.CTkFrame(left, fg_color="transparent")
         board_pad.pack(padx=18, pady=16)
 
-        self.line_name_label = theme.label(board_pad, "", "heading")
-        self.line_name_label.pack(anchor="w", pady=(0, 8))
+        header = ctk.CTkFrame(board_pad, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 8))
+        # step through the full line on the board (shown with Show full line)
+        self.step_next_button = theme.button(header, "▶", lambda: self._step_preview(+1), width=36, height=28)
+        self.step_prev_button = theme.button(header, "◀", lambda: self._step_preview(-1), width=36, height=28)
+        self.line_name_label = theme.label(header, "", "heading", wraplength=BOARD_PIXELS - 90)
+        self.line_name_label.pack(side="left", fill="x")
+        self._preview_index: Optional[int] = None   # None = the board follows the drill
+        self._awaiting_retry = False                 # a miss is waiting for Try again / Show correct move
+        self._offer_restart = False                  # after Show correct move: Same line / New random line
 
         self.board_widget = ChessBoardWidget(board_pad, self._on_my_move_attempt, bg=theme.PANEL_BG)
         self.board_widget.pack()
@@ -56,21 +76,26 @@ class OpeningDrillTab(ctk.CTkFrame):
 
         button_row = ctk.CTkFrame(board_pad, fg_color="transparent")
         button_row.pack(pady=(10, 0), anchor="w")
-        self.line_toggle = theme.button(button_row, "Show full line", self._toggle_full_line, width=130)
+        self.line_toggle = theme.button(button_row, "Show full line", self._toggle_full_line, width=116)
         self._show_full_line = False
         self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
         self.reveal_button = theme.button(button_row, "Show correct move", self._on_reveal, width=160)
-        self.play_button = theme.button(button_row, "Play it out vs Stockfish", self._play_it_out,
-                                        "primary", width=200)
+        # end-of-line choices (shown once a line is complete)
+        # widths: toggle + these two fit the board's width (352 px on a 768-px-tall screen)
+        self.same_line_button = theme.button(button_row, "Same line", self._drill_same_line, width=96)
+        self.new_line_button = theme.button(button_row, "New random line", self._drill_new_random_line,
+                                            "primary", width=124)
+        self.play_button = theme.button(button_row, "Play it out", self._play_it_out, width=100)
         self._line_missed = False
         # both hidden until a genuine (non-book) miss is made
 
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
 
-        # Setup (pick/import lines) vs Plans (what the opening is about)
+        # Setup (pick a line) vs Plans (what the opening is about) vs Add lines
+        # (import/edit) — separate views so the column fits short screens
         self.right_switch = ctk.CTkSegmentedButton(
-            right, values=["Setup", "Plans"], command=self._show_right_view,
+            right, values=["Setup", "Plans", ADD_LINES], command=self._show_right_view,
             height=34, font=theme.FONT_BOLD, fg_color=theme.PANEL_BG,
             selected_color=theme.CONTROL_BG, selected_hover_color=theme.CONTROL_BG,
             unselected_color=theme.PANEL_BG, unselected_hover_color=theme.PANEL_ALT,
@@ -79,7 +104,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.right_switch.pack(fill="x", pady=(0, 12))
         setup = ctk.CTkFrame(right, fg_color="transparent")
         plans = theme.card(right)
-        self._right_views = {"Setup": setup, "Plans": plans}
+        add_lines = ctk.CTkFrame(right, fg_color="transparent")
+        self._right_views = {"Setup": setup, "Plans": plans, ADD_LINES: add_lines}
         self.plans_body = ctk.CTkScrollableFrame(plans, fg_color="transparent")
         self.plans_body.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -120,8 +146,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         ).pack(anchor="w", fill="x")
 
         # ---- Manage card ----
-        manage_card = theme.card(setup)
-        manage_card.pack(fill="x", pady=(16, 0))
+        manage_card = theme.card(add_lines)
+        manage_card.pack(fill="x")
         manage = ctk.CTkFrame(manage_card, fg_color="transparent")
         manage.pack(fill="x", padx=18, pady=16)
         theme.label(manage, "Add or edit lines", "heading").pack(anchor="w", pady=(0, 8))
@@ -129,6 +155,18 @@ class OpeningDrillTab(ctk.CTkFrame):
                               ("Paste / type a line...", self._open_paste_dialog),
                               ("Turn lines on/off...", self._open_manage_lines_dialog)):
             theme.button(manage, text, command).pack(fill="x", pady=3)
+
+        # ---- Lichess card: real-world opponent replies ----
+        lichess_card = theme.card(add_lines)
+        lichess_card.pack(fill="x", pady=(16, 0))
+        lichess = ctk.CTkFrame(lichess_card, fg_color="transparent")
+        lichess.pack(fill="x", padx=18, pady=16)
+        theme.label(lichess, "Real opponents (Lichess)", "heading").pack(anchor="w", pady=(0, 4))
+        self.lichess_label = theme.label(lichess, "", "muted", wraplength=340)
+        self.lichess_label.pack(anchor="w", fill="x", pady=(0, 8))
+        self.lichess_button = theme.button(lichess, "", self._on_lichess_button)
+        self.lichess_button.pack(fill="x")
+        self._lichess_progress: Optional[str] = None
 
         self.right_switch.set("Setup")
         self._show_right_view("Setup")
@@ -200,9 +238,78 @@ class OpeningDrillTab(ctk.CTkFrame):
             self.recap_label.configure(text=f"Moves: {format_move_list(played)}" if played else "")
 
     def _toggle_full_line(self) -> None:
-        self._show_full_line = not self._show_full_line
-        self.line_toggle.configure(text="Hide full line" if self._show_full_line else "Show full line")
+        self._set_full_line(not self._show_full_line)
+
+    def _set_full_line(self, show: bool) -> None:
+        """Show full line: the line as text, ◀ / ▶ to step through it on the
+        board, and Same line / New random line to restart or skip."""
+        self._show_full_line = show
+        self.line_toggle.configure(text="Hide full line" if show else "Show full line")
+        self._preview_index = None
+        self._layout_buttons()
+        self._render_board()
         self._update_line_label()
+
+    def _layout_buttons(self) -> None:
+        """Mid-line buttons under the board (one row, the board's width):
+        Show/Hide full line, plus Same line + New random line while the full
+        line is shown or after Show correct move, else Try again + Show
+        correct move after a miss. The end of a line has its own set."""
+        for button in (self.line_toggle, self.retry_button, self.reveal_button, self.same_line_button,
+                       self.new_line_button, self.play_button, self.step_prev_button, self.step_next_button):
+            button.pack_forget()
+        if self.session is None or self.session.is_finished():
+            return
+        self.line_toggle.pack(side="left", padx=(0, 8))
+        if self._show_full_line:
+            self.step_next_button.pack(side="right")
+            self.step_prev_button.pack(side="right", padx=(0, 6))
+        if self._awaiting_retry and not self._show_full_line:
+            self.retry_button.pack(side="left")
+            self.reveal_button.pack(side="left", padx=(8, 0))
+        elif self._show_full_line or self._offer_restart:
+            self.same_line_button.pack(side="left")
+            self.new_line_button.pack(side="left", padx=(8, 0))
+
+    def _render_board(self) -> None:
+        """The drill position, or the full-line position being stepped through."""
+        if self.session is None:
+            return
+        if self._preview_index is None:
+            self.board_widget.show_board(self.session.board)
+            return
+        board = chess.Board()
+        for node in self.session.target_path[:self._preview_index]:
+            board.push(chess.Move.from_uci(node.move_uci))
+        self.board_widget.show_board(board)
+
+    def _step_preview(self, delta: int) -> None:
+        if self.session is None or not self._show_full_line:
+            return
+        live = len(self.session.board.move_stack)
+        current = live if self._preview_index is None else self._preview_index
+        index = max(0, min(len(self.session.target_path), current + delta))
+        self._preview_index = None if index == live else index
+        self._render_board()
+        if self._preview_index is None:
+            self.status_label.configure(text="Back to the drill — your move." if self.session.is_my_turn()
+                                        else "Back to the drill.", text_color=theme.TEXT)
+            return
+        sans = self.session.full_line_san()
+        last = f"{(index + 1) // 2}.{'' if index % 2 else '..'} {sans[index - 1]}" if index else ""
+        self.status_label.configure(
+            text=(f"Viewing the line: {'after ' + last if index else 'starting position'} "
+                  f"({index}/{len(sans)}). Step back to where you were, or Hide full line, "
+                  f"to keep drilling."),
+            text_color=theme.TEXT_MUTED)
+
+    def _on_arrow_key(self, delta: int) -> None:
+        if not self.winfo_ismapped() or not self._show_full_line:
+            return
+        focused = self.focus_get()
+        if focused is not None and focused.winfo_class() in ("Entry", "Text"):
+            return
+        self._step_preview(delta)
 
     def _line_preview(self, root) -> str:
         """Notation for a variation in the Setup list: its first branch at
@@ -250,7 +357,8 @@ class OpeningDrillTab(ctk.CTkFrame):
                                             text_color=theme.TEXT_MUTED)
             else:
                 self.status_label.configure(
-                    text="No repertoires yet. Import a PGN file or paste a line to begin.",
+                    text="No repertoires yet. Import a PGN file or paste a line "
+                         f"({ADD_LINES}, on the right) to begin.",
                     text_color=theme.TEXT_MUTED,
                 )
 
@@ -454,6 +562,61 @@ class OpeningDrillTab(ctk.CTkFrame):
         for _, _, label in self._variation_entries:
             self.variation_listbox.insert(tk.END, label)
         self.variation_listbox.selection_set(0)
+        self._download_opening_data()
+
+    # ---------- Lichess: real-world opponent replies ----------
+
+    def _on_lichess_button(self) -> None:
+        if explorer.get_token(self.conn):
+            lichess_ui.disconnect(self, self.conn, self._on_lichess_changed)
+        else:
+            lichess_ui.connect_dialog(self, self.conn, self._on_lichess_changed)
+
+    def _on_lichess_changed(self) -> None:
+        self._refresh_lichess_card()
+        self._download_opening_data()
+
+    def _refresh_lichess_card(self) -> None:
+        if not explorer.get_token(self.conn):
+            self.lichess_label.configure(
+                text="Not connected: when your lines branch, the computer picks the opponent's "
+                     "reply at random. Connect Lichess to have it reply as often as real "
+                     "players at your level do.")
+            self.lichess_button.configure(text="Connect Lichess...")
+            return
+        bands = explorer.rating_bands(self.conn)
+        text = (f"Connected: the computer picks the opponent's replies as often as Lichess "
+                f"players {explorer.describe_bands(bands)} play them (blitz and rapid).")
+        if self._lichess_progress:
+            text += f"\n{self._lichess_progress}"
+        self.lichess_label.configure(text=text)
+        self.lichess_button.configure(text="Disconnect Lichess")
+
+    def _download_opening_data(self) -> None:
+        """Fetches Lichess stats for every opponent position in the selected
+        repertoire that isn't cached yet (in the background)."""
+        selection = self._selected_repertoire()
+        if selection is None or not explorer.get_token(self.conn):
+            self._refresh_lichess_card()
+            return
+        fens = explorer.opponent_positions(self.conn, selection[0])
+
+        def on_progress(done, total):
+            self._lichess_progress = f"Downloading opening data: {done} / {total} positions…"
+            self._refresh_lichess_card()
+
+        def on_done(fetched, error):
+            self._lichess_progress = f"Couldn't download opening data: {error}" if error else None
+            self._refresh_lichess_card()
+
+        lichess_ui.downloader.start(self, self.conn, fens, on_done, on_progress)
+
+    def _move_share(self, fen: str, uci: str) -> Optional[float]:
+        """Share of Lichess games (at your level) with this move here; None if unknown."""
+        if not explorer.get_token(self.conn):
+            return None
+        stats = explorer.cached(self.conn, fen)
+        return stats.share(uci) if stats is not None and stats.games else None
 
     def _selected_entry(self):
         sel = self.variation_listbox.curselection()
@@ -520,17 +683,49 @@ class OpeningDrillTab(ctk.CTkFrame):
         my_color = PlayerColor(color_str)
 
         kind, _, _ = self._selected_entry()
-        self.session = OpeningDrillSession(self.conn, name, my_color)
+        self.session = OpeningDrillSession(self.conn, name, my_color, move_share=self._move_share)
         if not self.session.start(self._selected_root_id()):
             messagebox.showinfo("Empty repertoire", "That repertoire has no lines in it yet.")
             return
+        self._begin_line(kind)
 
+    def _drill_same_line(self) -> None:
+        if self.session is None:
+            return
+        self.session.restart()
+        kind, _, _ = self._selected_entry()
+        self._begin_line(kind)
+
+    def _drill_new_random_line(self) -> None:
+        """A random line from the whole repertoire — a different one than
+        just finished, when the repertoire has more than one."""
+        if self.session is None:
+            return
+        previous = [n.id for n in self.session.target_path]
+        session = OpeningDrillSession(self.conn, self.session.repertoire_name, self.session.my_color,
+                                      move_share=self._move_share)
+        for _ in range(10):
+            if not session.start():
+                return
+            if [n.id for n in session.target_path] != previous:
+                break
+        self.session = session
+        # reflect it in Setup: "Any line (random)"
+        self.variation_listbox.selection_clear(0, tk.END)
+        self.variation_listbox.selection_set(0)
+        self._begin_line("random")
+
+    def _begin_line(self, kind: str) -> None:
+        """Resets the board and panels for self.session's line and starts it."""
+        name, my_color = self.session.repertoire_name, self.session.my_color
         self._line_missed = False
-        self.play_button.pack_forget()
+        self._preview_index = None
+        self._awaiting_retry = False
+        self._offer_restart = False
         self.recap_label.configure(text="")
         self._show_full_line = False
         self.line_toggle.configure(text="Show full line")
-        self.line_toggle.pack(side="left", padx=(0, 8))
+        self._layout_buttons()
         self.move_note_label.configure(text="")
         self._render_plans(self.session.line_name, name, my_color)
         self.right_switch.set("Plans")
@@ -556,26 +751,37 @@ class OpeningDrillTab(ctk.CTkFrame):
             return
 
         if self.session.is_my_turn():
-            self.board_widget.show_board(self.session.board)
+            self._render_board()
             self.status_label.configure(text="Your move.", text_color=theme.TEXT)
             return
 
+        fen = self.session.board.fen()
+        uci = self.session.target_path[self.session.path_index].move_uci
         san = self.session.play_opponent_move()
-        self.board_widget.show_board(self.session.board)
-        self.status_label.configure(text=f"Opponent played {san}. Your move.", text_color=theme.TEXT)
+        self._render_board()
+        share = self._move_share(fen, uci)
+        how_often = f" ({share:.0%} of players at your level play it)" if share is not None else ""
+        self.status_label.configure(text=f"Opponent played {san}{how_often}. Your move.",
+                                    text_color=theme.TEXT)
         self._show_move_note(san)
         self.after(300, self._advance)
 
     def _show_completion(self) -> None:
         recap = format_move_list(self.session.full_line_san())
-        self.status_label.configure(text="End of line — nice work. Click New random line for another.",
+        self.status_label.configure(text="End of line — nice work. Go again, or try a new random line.",
                                  text_color=theme.SUCCESS)
         self.recap_label.configure(text=f"{self.session.line_name}:\n{recap}")
-        self._hide_retry_buttons()
-        self.line_toggle.pack_forget()
+        self._awaiting_retry = False
+        self._show_full_line = False
+        self._preview_index = None
+        self._layout_buttons()          # finished: clears the mid-line buttons
+        self._render_board()
         # one attempt per line: clean run = correct (clears it from Weak lines over time)
         db.record_attempt(self.conn, "line", self.session.target_path[0].id, not self._line_missed)
-        self.play_button.pack(side="left")
+        progression.notify()
+        self.same_line_button.pack(side="left")
+        self.new_line_button.pack(side="left", padx=(8, 0))
+        self.play_button.pack(side="left", padx=(8, 0))
 
     def _play_it_out(self) -> None:
         """Continue the finished line as a real game against Stockfish."""
@@ -586,10 +792,13 @@ class OpeningDrillTab(ctk.CTkFrame):
                    my_color=color)
 
     def _on_my_move_attempt(self, move: chess.Move) -> None:
+        if self._preview_index is not None:
+            self._render_board()        # viewing another position — not a drill move
+            return
         if self.session is None or not self.session.is_my_turn():
             return
         result: DrillResult = self.session.attempt_my_move(move)
-        self.board_widget.show_board(self.session.board)
+        self._render_board()
 
         if result.correct:
             self._hide_retry_buttons()
@@ -614,12 +823,12 @@ class OpeningDrillTab(ctk.CTkFrame):
             self._show_retry_buttons()
 
     def _show_retry_buttons(self) -> None:
-        self.retry_button.pack(side="left")
-        self.reveal_button.pack(side="left", padx=(8, 0))
+        self._awaiting_retry = True
+        self._layout_buttons()
 
     def _hide_retry_buttons(self) -> None:
-        self.retry_button.pack_forget()
-        self.reveal_button.pack_forget()
+        self._awaiting_retry = False
+        self._layout_buttons()
 
     def _on_retry(self) -> None:
         self._hide_retry_buttons()
@@ -629,8 +838,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         if self.session is None:
             return
         self._line_missed = True
+        self._offer_restart = True
         san = self.session.reveal_and_advance()
-        self.board_widget.show_board(self.session.board)
+        self._render_board()
         self._hide_retry_buttons()
         if san is None:
             # shouldn't normally happen (reveal is only offered mid-line),
@@ -638,6 +848,7 @@ class OpeningDrillTab(ctk.CTkFrame):
             self.status_label.configure(text="Nothing left to reveal.", text_color=theme.TEXT)
             self._advance()
             return
-        self.status_label.configure(text=f"Correct move was {san}.", text_color=theme.TEXT)
+        self.status_label.configure(
+            text=f"Correct move was {san}. Keep going, or start over with Same line.", text_color=theme.TEXT)
         self._show_move_note(san)
         self.after(700, self._advance)

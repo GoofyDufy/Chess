@@ -250,3 +250,141 @@ def gap_pgn(gap: Gap, line_name: str) -> Optional[str]:
         sans = gap.prefix + [gap.move]
     moves = format_line(sans)
     return f'[Event "{line_name}"]\n\n{moves} *\n'
+
+
+# ---------- popular moves your repertoire doesn't answer (Lichess data) ----------
+
+MIN_POPULAR_SHARE = 0.08     # a reply played in at least 8% of games at that position
+MIN_POPULAR_GAMES = 30       # ...with enough games behind it to mean something
+MIN_REPLY_SHARE = 0.10       # suggested answers come from replies at least this common
+
+
+@dataclass
+class PopularGap:
+    color: str                   # your color
+    prefix: List[str]            # SAN moves to the position (through your repertoire)
+    move: str                    # the popular opponent move you have no answer to
+    share: float                 # how often it's played in that position
+    reach: float                 # chance a game gets to that position at all (opponents' choices)
+    games: int
+    opponent_score: float        # how players who choose it score
+    suggestion: Optional[str] = None
+    suggestion_source: str = ""  # "engine" / "lichess"
+
+    @property
+    def line(self) -> str:
+        return format_line(self.prefix + [self.move])
+
+    @property
+    def frequency(self) -> float:
+        """Rough share of your games (in this repertoire) that would see this move."""
+        return self.reach * self.share
+
+    def as_gap(self) -> Gap:
+        """For gap_pgn / Add to repertoire."""
+        return Gap(self.color, list(self.prefix), self.move, True,
+                   suggestion=self.suggestion, suggestion_source=self.suggestion_source)
+
+
+def popular_gaps(conn: sqlite3.Connection, stats_for) -> List[PopularGap]:
+    """stats_for(fen) -> explorer.PositionStats or None (cache only — no
+    network here). Walks each enabled repertoire tree; at every position
+    where the opponent is to move and your prep continues, any popular
+    reply that no line covers is a gap. Sorted by how often you'd actually face it."""
+    found: Dict[Tuple[str, str, str], PopularGap] = {}
+
+    for color in ("white", "black"):
+        mine = chess.WHITE if color == "white" else chess.BLACK
+        _, rep_moves = _repertoire(conn, color)
+        # position -> repertoire moves from it, merged across every line
+        # (separately imported lines and transpositions included)
+        moves_at: Dict[str, List[str]] = defaultdict(list)
+        for key, uci in sorted(rep_moves):
+            moves_at[key].append(uci)
+        seen: Dict[str, float] = {}      # position -> best reach already explored
+
+        def visit(board: chess.Board, sans: List[str], reach: float) -> None:
+            key = position_key(board.fen())
+            if seen.get(key, -1.0) >= reach:
+                return
+            seen[key] = reach
+            nodes = moves_at.get(key, [])
+            # only where your prep continues with an opponent move — a line that
+            # ends here is a deliberate stopping point, not a hole
+            stats = stats_for(board.fen()) if board.turn != mine and nodes else None
+            if stats is not None and stats.games:
+                for m in stats.moves:
+                    share = m.games / stats.games
+                    if share < MIN_POPULAR_SHARE or m.games < MIN_POPULAR_GAMES:
+                        continue
+                    if (key, m.uci) in rep_moves:
+                        continue
+                    try:
+                        san = board.san(chess.Move.from_uci(m.uci))
+                    except (ValueError, AssertionError):
+                        continue
+                    gkey = (color, key, m.uci)
+                    if gkey not in found or found[gkey].reach < reach:
+                        found[gkey] = PopularGap(color, list(sans), san, share, reach, m.games,
+                                                 m.score_for(board.turn))
+            for uci in nodes:
+                move = chess.Move.from_uci(uci)
+                if move not in board.legal_moves:
+                    continue
+                step = 1.0
+                if board.turn != mine and stats is not None and stats.games:
+                    step = stats.share(uci)
+                san = board.san(move)
+                board.push(move)
+                visit(board, sans + [san], reach * step)
+                board.pop()
+
+        if moves_at:
+            visit(chess.Board(), [], 1.0)
+
+    gaps = list(found.values())
+    _suggest_replies(conn, gaps, stats_for)
+    return sorted(gaps, key=lambda g: -g.frequency)
+
+
+def _suggest_replies(conn: sqlite3.Connection, gaps: List[PopularGap], stats_for) -> None:
+    """Your answer to each gap: Stockfish's best move there if any analyzed
+    game reached it, else the best-scoring common reply on Lichess."""
+    after: Dict[str, Tuple[PopularGap, chess.Board]] = {}
+    for g in gaps:
+        board = chess.Board()
+        for s in g.prefix + [g.move]:
+            board.push_san(s)
+        after[position_key(board.fen())] = (g, board)
+    engine_best: Dict[str, Counter] = defaultdict(Counter)
+    for r in conn.execute("SELECT fen_before, best_move_uci FROM move_evaluations WHERE best_move_uci IS NOT NULL"):
+        key = position_key(r["fen_before"])
+        if key in after:
+            engine_best[key][r["best_move_uci"]] += 1
+    for key, (g, board) in after.items():
+        try:
+            if key in engine_best:
+                g.suggestion = board.san(chess.Move.from_uci(engine_best[key].most_common(1)[0][0]))
+                g.suggestion_source = "engine"
+                continue
+            stats = stats_for(board.fen())
+            if stats is None or not stats.games:
+                continue
+            common = [m for m in stats.moves if m.games / stats.games >= MIN_REPLY_SHARE] or stats.moves[:1]
+            best = max(common, key=lambda m: (m.score_for(board.turn), m.games))
+            g.suggestion = board.san(chess.Move.from_uci(best.uci))
+            g.suggestion_source = "lichess"
+        except (ValueError, AssertionError):
+            continue
+
+
+def gap_reply_positions(gaps: List[PopularGap]) -> List[str]:
+    """Positions right after each gap move (where you'd answer) — worth
+    downloading so _suggest_replies can use Lichess data."""
+    fens = []
+    for g in gaps:
+        board = chess.Board()
+        for s in g.prefix + [g.move]:
+            board.push_san(s)
+        fens.append(board.fen())
+    return fens

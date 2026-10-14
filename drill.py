@@ -14,6 +14,15 @@ flags in DrillResult.in_book for messaging purposes. It never changes
 which line is being drilled or accepts the move as correct. If you're
 drilling a specific line, only that line's own next move counts.
 
+Real-world opponents: with Lichess data (move_share, see explorer.py),
+the whole line is picked at once, weighted by how likely real players near
+your rating are to follow it — the product of the opponent's move shares
+along it (each with a floor, so rare lines still come up). Lines that
+differ only in YOUR moves split that weight evenly: every option in your
+prep gets drilled. This works the same whether the repertoire is one
+branching tree or many separately imported lines. Without data, a line is
+picked uniformly as before.
+
 Wrong moves don't auto-correct: attempt_my_move() leaves the board and
 position untouched on a miss, so you can just try again, or call
 reveal_and_advance() to see the answer.
@@ -24,12 +33,18 @@ from __future__ import annotations
 import random
 import sqlite3
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import chess
 
 import db
 from models import OpeningLine, PlayerColor
+
+# a reply played in under this share of games is still drilled this often
+MIN_REPLY_WEIGHT = 0.05
+
+# (fen, uci) -> share of games where that move was played there, or None if unknown
+ShareLookup = Callable[[str, str], Optional[float]]
 
 
 @dataclass
@@ -44,8 +59,10 @@ class DrillResult:
 
 
 class OpeningDrillSession:
-    def __init__(self, conn: sqlite3.Connection, repertoire_name: str, my_color: PlayerColor):
+    def __init__(self, conn: sqlite3.Connection, repertoire_name: str, my_color: PlayerColor,
+                 move_share: Optional[ShareLookup] = None):
         self.conn = conn
+        self.move_share = move_share
         self.repertoire_name = repertoire_name
         self.my_color = my_color
         self.board = chess.Board()
@@ -64,14 +81,21 @@ class OpeningDrillSession:
         if not roots:
             return False
 
-        path = [random.choice(roots)]
-        path.extend(self._tree_continuation_from(path[0]))
+        path = self._weighted_line(roots) if self.move_share is not None else None
+        if path is None:
+            path = [random.choice(roots)]
+            path.extend(self._tree_continuation_from(path[0]))
 
         self.target_path = path
         self.line_name = path[0].line_name or self.repertoire_name
         self.board = chess.Board()
         self.path_index = 0
         return True
+
+    def restart(self) -> None:
+        """Same line again from the first move."""
+        self.board = chess.Board()
+        self.path_index = 0
 
     def _tree_continuation_from(self, node: OpeningLine) -> List[OpeningLine]:
         """Random walk downward from (but not including) node to a leaf,
@@ -86,6 +110,49 @@ class OpeningDrillSession:
             current = random.choice(children)
             continuation.append(current)
         return continuation
+
+    def _all_lines(self, roots: List[OpeningLine]) -> List[List[OpeningLine]]:
+        """Every root-to-leaf path under these roots."""
+        lines = []
+
+        def walk(path: List[OpeningLine]) -> None:
+            children = db.children_of(self.conn, path[-1].id)
+            if not children:
+                lines.append(path)
+            for child in children:
+                walk(path + [child])
+
+        for root in roots:
+            walk([root])
+        return lines
+
+    def _weighted_line(self, roots: List[OpeningLine]) -> Optional[List[OpeningLine]]:
+        """A whole line, picked by how likely real opponents are to follow it
+        (see the module docstring). None when there's no data to weight by."""
+        lines = self._all_lines(roots)
+        weights, opponent_moves, known = [], [], False
+        for line in lines:
+            weight, theirs = 1.0, []
+            for i, node in enumerate(line):
+                if not node.fen_before_move or self._is_mine(node.fen_before_move):
+                    continue
+                theirs.append((i, node.move_uci))
+                share = self.move_share(node.fen_before_move, node.move_uci)
+                if share is not None:
+                    known = True
+                    weight *= max(share, MIN_REPLY_WEIGHT)
+            weights.append(weight)
+            opponent_moves.append(tuple(theirs))
+        if not known:
+            return None
+        # lines with the same opponent moves differ only in yours: share the weight
+        same = {k: opponent_moves.count(k) for k in set(opponent_moves)}
+        weights = [w / same[k] for w, k in zip(weights, opponent_moves)]
+        return random.choices(lines, weights=weights)[0]
+
+    def _is_mine(self, fen: str) -> bool:
+        turn = PlayerColor.WHITE if chess.Board(fen).turn == chess.WHITE else PlayerColor.BLACK
+        return turn == self.my_color
 
     def _is_book_elsewhere(self, move: chess.Move) -> bool:
         """Informational check: does this move match some OTHER line in

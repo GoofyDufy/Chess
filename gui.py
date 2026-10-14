@@ -23,10 +23,12 @@ import customtkinter as ctk
 
 import db
 import profiles
+import progression
 import theme
 from board_widget import BOARD_PIXELS
 from drill_tab import OpeningDrillTab
 from game_review_tab import GameReviewTab
+from level_card import LevelCard
 from progress_tab import ProgressTab
 from puzzle_tab import PuzzleReviewTab
 from scout_tab import ScoutTab
@@ -57,7 +59,7 @@ class App(ctk.CTk):
 
         brand = ctk.CTkFrame(sidebar, fg_color="transparent")
         brand.pack(fill="x", padx=18, pady=(24, 22))
-        ctk.CTkLabel(brand, text="♞", width=34, height=34, corner_radius=10,
+        ctk.CTkLabel(brand, text="♚", width=34, height=34, corner_radius=10,
                      fg_color=theme.ACCENT, text_color=theme.ACCENT_TEXT,
                      font=(theme.FONT_FAMILY, 20)).pack(side="left")
         theme.label(brand, "King Coach", "heading").pack(side="left", padx=(10, 0))
@@ -72,6 +74,10 @@ class App(ctk.CTk):
         self.player_menu.pack(padx=12, fill="x")
         theme.button(player_card, "+ New player", self._new_player, "ghost", height=32).pack(
             fill="x", padx=6, pady=(4, 8))
+
+        # ---- level / XP (just above the player switcher) ----
+        self.level_card = LevelCard(sidebar)
+        self.level_card.pack(side="bottom", fill="x", padx=12)
 
         self.nav_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
         self.nav_frame.pack(fill="x")
@@ -97,6 +103,8 @@ class App(ctk.CTk):
         self.player_var.set(name)
         self.title(f"King Coach — {name}")
         self.conn = db.get_connection(profiles.db_path(name))
+        progression.clear_listeners()   # the old player's tabs and card are gone
+        self.level_card.attach(self.conn)
         self._build_pages()
 
     def _on_player_selected(self, name: str) -> None:
