@@ -20,6 +20,7 @@ import explorer  # noqa: E402
 import opening_importer  # noqa: E402
 import opening_tree  # noqa: E402
 import progression  # noqa: E402
+import puzzle_kind  # noqa: E402
 import spot  # noqa: E402
 import repertoire_gaps  # noqa: E402
 from drill import OpeningDrillSession  # noqa: E402
@@ -448,6 +449,40 @@ class FakeEngine:
             lines.append({"pv": [chess.Move.from_uci(u) for u in ucis],
                           "score": chess.engine.PovScore(pov, board.turn)})
         return lines if multipv else lines[0]
+
+
+class PuzzleKindTests(unittest.TestCase):
+    HANGING = "rnb1kbnr/ppp1pppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR w KQkq - 0 3"   # Nxd5 wins the queen
+
+    @staticmethod
+    def passed_key(fen):
+        b = chess.Board(fen)
+        b.push(chess.Move.null())
+        return b.fen().split()[0]
+
+    def test_a_forcing_win_is_attacking(self):
+        board = chess.Board(self.HANGING)
+        eng = FakeEngine({board.fen().split()[0]: [(["c3d5", "c7c6", "d5c3"], 900)]})
+        r = puzzle_kind.classify(eng, self.HANGING, "c3d5")
+        self.assertEqual((r.kind, r.moves, [m.uci() for m in r.solution]), ("Attacking", 1, ["c3d5"]))
+
+    def test_meeting_a_threat_is_defensive_otherwise_positional(self):
+        fen = chess.STARTING_FEN
+        key = chess.Board(fen).fen().split()[0]
+        # if White could pass, Black would be 2 pawns better off: White faces a threat
+        threat = FakeEngine({key: [(["e2e4"], 20)], self.passed_key(fen): [([], 180)]})
+        self.assertEqual(puzzle_kind.classify(threat, fen, "e2e4").kind, "Defensive")
+        calm = FakeEngine({key: [(["e2e4"], 20)], self.passed_key(fen): [([], -10)]})
+        self.assertEqual(puzzle_kind.classify(calm, fen, "e2e4").kind, "Positional")
+
+    def test_saved_and_read_back(self):
+        conn = fresh_conn()
+        p = analyzer.puzzles_from_evaluations([ev(0, START, "e2e4", "d2d4", 30, -200)], 150)[0]
+        db.replace_puzzles_for_games(conn, ["g1"], [p])
+        puzzle_kind.save(conn, p.id, puzzle_kind.Result([chess.Move.from_uci("d2d4")], "Positional"))
+        back = db.all_puzzles(conn)[0]
+        self.assertEqual((back.kind, back.solution_moves, back.solution_ucis), ("Positional", 1, "d2d4"))
+        self.assertEqual(puzzle_kind.unclassified(conn), [])
 
 
 class SpotTheTacticTests(unittest.TestCase):

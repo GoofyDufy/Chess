@@ -196,6 +196,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE puzzles ADD COLUMN eval_after_cp INTEGER")
     if "puzzle_type" not in existing_cols:
         conn.execute("ALTER TABLE puzzles ADD COLUMN puzzle_type TEXT")
+    # what kind of puzzle (puzzle_kind.py): its solution, how many of your moves, attacking/defensive/positional
+    for col, col_type in (("solution_ucis", "TEXT"), ("solution_moves", "INTEGER"), ("kind", "TEXT")):
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE puzzles ADD COLUMN {col} {col_type}")
     opening_cols = {row["name"] for row in conn.execute("PRAGMA table_info(opening_lines)")}
     if "line_name" not in opening_cols:
         conn.execute("ALTER TABLE opening_lines ADD COLUMN line_name TEXT")
@@ -404,6 +408,9 @@ def _row_to_puzzle(r: sqlite3.Row) -> Puzzle:
         puzzle_type=r["puzzle_type"] if "puzzle_type" in r.keys() else None,
         source_game_id=r["source_game_id"], opening_line_id=r["opening_line_id"],
         created_at=dt.datetime.fromisoformat(r["created_at"]),
+        solution_ucis=r["solution_ucis"] if "solution_ucis" in r.keys() else None,
+        solution_moves=r["solution_moves"] if "solution_moves" in r.keys() else None,
+        kind=r["kind"] if "kind" in r.keys() else None,
     )
 
 

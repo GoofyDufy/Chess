@@ -26,6 +26,7 @@ import chess.engine
 import engine_locator
 import explain
 import progression
+import puzzle_kind
 import spot
 import stats
 import style
@@ -54,6 +55,9 @@ ALL_POSITIONS = "All positions"
 SHARP_ONLY = "Sharp (one best move)"
 QUIET_ONLY = "Quiet (several good moves)"
 ENDGAMES = "Endgames"
+ALL_KINDS = "All kinds"
+MULTI_STEP = "Multi-step (2+ moves)"
+KIND_OPTIONS = [ALL_KINDS, puzzle_kind.ATTACKING, puzzle_kind.DEFENSIVE, puzzle_kind.POSITIONAL, MULTI_STEP]
 
 DEFAULT_THRESHOLD_PAWNS = "1.5"
 DEFAULT_GAMES_PER_RUN = "50"
@@ -160,10 +164,14 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._busy = False
 
         self.import_page = ctk.CTkFrame(master, fg_color="transparent")
+        # new puzzles get their kind / solution worked out in the background (puzzle_kind.py)
+        self._classify_stop: Optional[threading.Event] = None
         self._build_layout()
         self._refresh_game_summary()
         self._reload_queue()
         self.after(100, self._poll_ui_queue)
+        self.after(3000, self._classify_new_puzzles)         # any left from before (e.g. a stopped run)
+        self.bind("<Destroy>", lambda e: self._pause_classifying(), add="+")
 
         top = self.winfo_toplevel()
         top.bind("<Left>", lambda e: self._on_arrow_key(self._go_previous), add="+")
@@ -311,6 +319,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
             games, "Stockfish results are saved, so games are never analyzed twice.",
             "muted", wraplength=340,
         ).pack(anchor="w", pady=(6, 0))
+        self.classify_label = theme.label(games, "", "muted", wraplength=340)
+        self.classify_label.pack(anchor="w", pady=(4, 0))
 
         # ---- Puzzle queue card ----
         queue_card = theme.card(right)
@@ -326,6 +336,16 @@ class PuzzleReviewTab(ctk.CTkFrame):
             queue_heading, ["All types"], self.type_filter_var, lambda _: self._reload_queue(), width=150,
         )
         self.type_filter_dropdown.pack(side="right")
+
+        kind_row = ctk.CTkFrame(queue_box, fg_color="transparent")
+        kind_row.pack(fill="x", pady=(0, 8))
+        theme.label(kind_row, "Kind", "muted").pack(side="left")
+        # attacking / defensive / positional, or multi-step only (see puzzle_kind.py)
+        self.kind_var = tk.StringVar(value=db.get_setting(self.conn, "puzzle_kind_filter") or ALL_KINDS)
+        if self.kind_var.get() not in KIND_OPTIONS:
+            self.kind_var.set(ALL_KINDS)
+        theme.option_menu(kind_row, KIND_OPTIONS, self.kind_var, lambda _: self._on_kind_filter(),
+                          width=230).pack(side="right")
 
         position_row = ctk.CTkFrame(queue_box, fg_color="transparent")
         position_row.pack(fill="x", pady=(0, 8))
@@ -354,6 +374,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.queue_listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
         scrollbar.pack(side="left", fill="y", pady=8)
         self.queue_listbox.bind("<<ListboxSelect>>", self._on_queue_select)
+
+    def _on_kind_filter(self) -> None:
+        db.set_setting(self.conn, "puzzle_kind_filter", self.kind_var.get())
+        self._reload_queue()
 
     def _focus_classes(self) -> Optional[set]:
         """Time classes the Focus dropdown limits analysis and the queue to."""
@@ -401,6 +425,11 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.queue = sorted((p for p in self.queue if p.id in weak), key=lambda p: -weak[p.id])
         elif selected_type == ENDGAMES:
             self.queue = [p for p in self.queue if stats.is_endgame(p.fen)]
+        kind = self.kind_var.get()
+        if kind == MULTI_STEP:
+            self.queue = [p for p in self.queue if (p.solution_moves or 0) > 1]
+        elif kind != ALL_KINDS:
+            self.queue = [p for p in self.queue if p.kind == kind]
         position = self.position_var.get()
         if position != ALL_POSITIONS:
             # sharp = one clearly best move (engine's top choice far ahead of its 2nd)
@@ -410,7 +439,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             WEAK_SPOTS: "No weak spots right now. Puzzles you miss show up here until you "
                         "solve them twice in a row.",
             ENDGAMES: "No endgame puzzles in this filter yet.",
-        }.get(selected_type, "No puzzles match these filters." if position != ALL_POSITIONS else
+        }.get(selected_type, "No puzzles match these filters." if position != ALL_POSITIONS or kind != ALL_KINDS else
                "No puzzles yet. Import your games, then click Analyze new games.")
 
         self._refresh_listbox()
@@ -531,7 +560,11 @@ class PuzzleReviewTab(ctk.CTkFrame):
         else:
             white, black = self.current_game.opponent_username, my_username
         played = self.current_game.played_at.strftime("%b %d, %Y")
-        type_tag = f"{self.current_puzzle.puzzle_type} — " if self.current_puzzle.puzzle_type else ""
+        p = self.current_puzzle
+        tags = [t for t in (p.kind, p.puzzle_type) if t]
+        if (p.solution_moves or 0) > 1:
+            tags.append(f"{p.solution_moves} moves")
+        type_tag = " · ".join(tags) + " — " if tags else ""
         return f"{type_tag}{white} (White) vs {black} (Black) — {played}"
 
     # ---------- Attempting a puzzle ----------
@@ -855,18 +888,20 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._ply, self._seq_board, self._seq_missed = 0, chess.Board(p.fen), False
         self._run_attempt_id = None
 
+        if p.solution_ucis:                         # worked out before (puzzle_kind.py): instant
+            self._solution = [chess.Move.from_uci(u) for u in p.solution_ucis.split()]
+            self._solution_ready = True
+            return
+
         def worker():
             solution = [best]
-            engine = None
+            engine, result = None, None
             try:
                 path = engine_locator.find_stockfish()
                 if path:
                     engine = chess.engine.SimpleEngine.popen_uci(path)
-                    board = chess.Board(p.fen)
-                    info = engine.analyse(board, chess.engine.Limit(depth=SOLUTION_DEPTH))
-                    pv = list(info.get("pv", []))
-                    if pv and pv[0] == best:            # the engine agrees on the first move
-                        solution = spot.solution_for(board, pv, info["score"]) or [best]
+                    result = puzzle_kind.classify(engine, p.fen, p.correct_move_uci)
+                    solution = result.solution
             except Exception:
                 solution = [best]
             finally:
@@ -877,9 +912,17 @@ class PuzzleReviewTab(ctk.CTkFrame):
                         pass
 
             def apply():
+                if result is not None:               # save it: next time it's instant, and filterable
+                    try:
+                        puzzle_kind.save(self.conn, p.id, result)
+                        p.solution_ucis = " ".join(m.uci() for m in result.solution)
+                        p.solution_moves, p.kind = result.moves, result.kind
+                    except Exception:
+                        pass
                 if self._solution_token is not token:
                     return
                 self._solution, self._solution_ready = solution, True
+                self.game_label.configure(text=self._game_label_text())
                 if self.attempt_state == "pending":         # first move already played
                     self._after_correct(chess.Board(p.fen).san(best))
             self._ui_queue.put(apply)
@@ -1188,6 +1231,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
                                 f"Every imported game{scope} has already been analyzed.", parent=self)
             return
 
+        self._pause_classifying()                # the analysis gets the processor
         self._stop_event.clear()
         self._set_busy(True)
         self._show_progress("Preparing...", maximum=1, stoppable=True)
@@ -1248,6 +1292,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self._set_busy(False)
             self._refresh_game_summary()
             self._reload_queue()
+            self.after(500, self._classify_new_puzzles)        # the new puzzles' kinds
             prefix = "Stopped. " if stopped else ""
             messagebox.showinfo(
                 "Analysis stopped" if stopped else "Analysis complete",
@@ -1257,6 +1302,65 @@ class PuzzleReviewTab(ctk.CTkFrame):
             )
 
         self._ui_queue.put(on_done)
+
+    # ---------- classifying new puzzles in the background (puzzle_kind.py) ----------
+
+    def _classify_new_puzzles(self) -> None:
+        """Works out kind + solution for puzzles that don't have them yet, on
+        background threads; results are saved here on the UI thread. Never
+        while an import / analysis is running (that pauses it)."""
+        if self._busy or self._classify_stop is not None or not self.winfo_exists():
+            return
+        todo = puzzle_kind.unclassified(self.conn)
+        path = engine_locator.find_stockfish()
+        if not todo or path is None:
+            return
+        stop = threading.Event()
+        self._classify_stop = stop
+        engines = analyzer.PARALLEL_ENGINES if self.parallel_var.get() else 1
+        self.classify_label.configure(text=f"Sorting {len(todo)} new puzzles into kinds…")
+
+        def on_result(pid, result):
+            self._ui_queue.put(lambda: self._save_kind(pid, result))
+
+        def on_progress(done, total):
+            if done % 10 == 0 or done == total:
+                self._ui_queue.put(lambda: self.classify_label.configure(
+                    text=f"Sorting new puzzles into kinds: {done} / {total}…"))
+
+        def worker():
+            try:
+                puzzle_kind.classify_all(path, todo, on_result, engines=engines, stop=stop,
+                                         on_progress=on_progress)
+            except Exception:
+                pass
+            self._ui_queue.put(lambda: self._classify_finished(stop))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _save_kind(self, puzzle_id: str, result) -> None:
+        try:
+            puzzle_kind.save(self.conn, puzzle_id, result)
+        except Exception:
+            return                                     # e.g. rebuilt meanwhile: it'll be redone
+        for p in self.queue:                           # the queue's copy too, without reloading it
+            if p.id == puzzle_id:
+                p.solution_ucis = " ".join(m.uci() for m in result.solution)
+                p.solution_moves, p.kind = result.moves, result.kind
+
+    def _classify_finished(self, stop: threading.Event) -> None:
+        if self._classify_stop is stop:
+            self._classify_stop = None
+        left = len(puzzle_kind.unclassified(self.conn))
+        self.classify_label.configure(text="" if not left else
+                                      f"{left} puzzles still to sort into kinds (continues after the analysis).")
+        if left and not stop.is_set():
+            self.after(500, self._classify_new_puzzles)
+
+    def _pause_classifying(self) -> None:
+        if self._classify_stop is not None:
+            self._classify_stop.set()
+            self._classify_stop = None
 
     def _on_stop(self) -> None:
         self._stop_event.set()
@@ -1296,6 +1400,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._hide_progress()
         self._set_busy(False)
         self._reload_queue()
+        self.after(500, self._classify_new_puzzles)            # rebuilt puzzles: their kinds again
         msg = (f"Rebuilt {puzzle_count} puzzles from {game_count} analyzed games "
                f"(blunder size {threshold_cp / 100:.1f} pawns).")
         if legacy:

@@ -94,6 +94,11 @@ class Puzzle:
     source_game_id: Optional[str] = None
     opening_line_id: Optional[str] = None
     created_at: dt.datetime = field(default_factory=dt.datetime.now)
+    # from puzzle_kind.py (None until classified): the solution to play, how many
+    # of your moves it is, and Attacking / Defensive / Positional
+    solution_ucis: Optional[str] = None
+    solution_moves: Optional[int] = None
+    kind: Optional[str] = None
 
 
 @dataclass

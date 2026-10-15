@@ -51,8 +51,12 @@ keeps score with XP and levels.
 ### Puzzle Review
 Your own mistakes as puzzles. Click a piece, then its square.
 - A queue with filters: type (Hanging Piece, Fork, …), **Weak spots**
-  (puzzles you keep missing, until solved twice in a row), **Endgames**, and
-  sharp (one best move) vs quiet positions. **Random** jumps to a puzzle you
+  (puzzles you keep missing, until solved twice in a row), **Endgames**,
+  sharp (one best move) vs quiet positions, and **Kind**: **Attacking** (a
+  forced mate or a forcing sequence that wins material), **Defensive** (you
+  face a threat: in check, or passing would cost 1.5+ pawns), **Positional**
+  (neither), or **Multi-step** only. Stockfish sorts new puzzles into kinds in
+  the background after each analysis. **Random** jumps to a puzzle you
   haven't seen this session; ← / → move through the queue.
 - Forcing tactics are **multi-move**: play the line to the end (up to 4 of
   your moves) while Stockfish plays the replies. A miss gives **Try again** /
