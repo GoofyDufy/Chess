@@ -54,16 +54,39 @@ Your own mistakes as puzzles. Click a piece, then its square.
   (puzzles you keep missing, until solved twice in a row), **Endgames**,
   sharp (one best move) vs quiet positions, and **Kind**: **Attacking** (a
   forced mate or a forcing sequence that wins material), **Defensive** (you
-  face a threat: in check, or passing would cost 1.5+ pawns), **Positional**
-  (neither), or **Multi-step** only. Stockfish sorts new puzzles into kinds in
-  the background after each analysis. **Random** jumps to a puzzle you
-  haven't seen this session; ← / → move through the queue.
+  face a threat — in check, or passing would cost 1.5+ pawns — and the answer
+  is quiet: no capture, check or attack, as Lichess defines a defensive
+  move), **Counterattack** (you face a threat and hit back with a capture,
+  check or attack), **Positional** (neither), or **Multi-step** only.
+  Stockfish sorts new puzzles into kinds in the background after each
+  analysis. **Random** jumps to a puzzle you haven't seen this session;
+  ← / → move through the queue.
+- **Tags** above the board: the puzzle's kind, type, length, sharp / quiet
+  and (Lichess puzzles) every Lichess theme, motifs first. **+ Tag** (or
+  **+N**) opens a tag picker listing them all: click Lichess-style tags on
+  and off, or type your own and press Enter. Yours show in amber, right
+  after the kind — click one to remove it. Your tags are kept
+  when puzzles are rebuilt and show in the type filter as **Tag: …**.
 - Forcing tactics are **multi-move**: play the line to the end (up to 4 of
   your moves) while Stockfish plays the replies. A miss gives **Try again** /
   **Show answer**; only a clean first run counts.
-- After solving: an explanation, the evaluation bar, and **◀ ▶** through
-  Stockfish's main line. Your record per puzzle (✓ correct · ◐ near-best ·
-  ✗ missed). **Review game** and **Play it out** open the position elsewhere.
+- After solving: the board stays where your line ended, with an
+  explanation, the evaluation bar, and **◀ ▶** back through your line and on
+  into Stockfish's continuation. Your record per puzzle, top right
+  (✓ correct · ◐ near-best · ✗ missed). **Review game** and **Play it out** open the position elsewhere.
+- **Analyze**: once a puzzle is done, go back to its starting position and
+  try your own ideas — move either side, ◀ takes back, ▶ walks the solution —
+  while Stockfish shows its top 3 lines (green / blue / grey arrows) and the
+  evaluation bar follows. Click a line and ▶ plays it; **Stop analysis**
+  returns to the solution.
+- **Lichess puzzles** (optional): on Import & Analyze → **Lichess puzzles**,
+  pick a rating range and how many, and **Add Lichess puzzles** pulls them
+  from the free Lichess puzzle database (CC0) — only well-rated, popular
+  ones; the big file is streamed, never saved. They're kept apart from your
+  own: choose **My games / Lichess / My games + Lichess** in the queue's
+  **Puzzles** dropdown. They show the opponent's move that sets them up, earn
+  XP, and have their own records, but don't change your stats, Progress or
+  weak spots from your games. **Open on Lichess** shows the original game.
 
 ### Spot the Tactic
 A game: a position from your games — is there a tactic? Answer, then play.
@@ -161,8 +184,8 @@ files) here.
 
 ## Your data stays local
 
-`chessprep.db` holds your games, analysis, puzzles, repertoires, settings
-and your Lichess token; `profiles.json` lists the players. Both are in
+`chessprep.db` holds your games, analysis, puzzles (and any Lichess puzzles
+you added), your tags, repertoires, settings and your Lichess token; `profiles.json` lists the players. Both are in
 `.gitignore` and must never be committed — here or in any other project
 that copies them (the web version included). The `stockfish/` folder and
 the `.venv/` Python environment are ignored too.

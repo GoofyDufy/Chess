@@ -81,7 +81,7 @@ def _attempts_xp(conn: sqlite3.Connection) -> int:
         outcome = db.attempt_outcome(r)
         if day_key not in scored_today:
             scored_today.add(day_key)
-            if r["item_type"] == "puzzle":
+            if r["item_type"] in ("puzzle", "lichess"):          # your games' / Lichess puzzles
                 xp += PUZZLE_XP.get(outcome, 0)
                 if outcome == "correct" and r["sharp"]:
                     xp += SHARP_BONUS_XP

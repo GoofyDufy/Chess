@@ -27,6 +27,7 @@ class GameResult(str, Enum):
 class PuzzleSource(str, Enum):
     OWN_GAME_MISTAKE = "own_game_mistake"
     OPENING_PREP = "opening_prep"
+    LICHESS = "lichess"                 # from the Lichess puzzle database (lichess_puzzles.py)
 
 
 def new_id() -> str:
@@ -99,6 +100,14 @@ class Puzzle:
     solution_ucis: Optional[str] = None
     solution_moves: Optional[int] = None
     kind: Optional[str] = None
+    # Lichess puzzles only: their rating, themes, game, opening, and the
+    # opponent's move that sets the puzzle up (shown on the board first)
+    rating: Optional[int] = None
+    themes: Optional[str] = None
+    game_url: Optional[str] = None
+    opening: Optional[str] = None
+    setup_fen: Optional[str] = None
+    setup_uci: Optional[str] = None
 
 
 @dataclass

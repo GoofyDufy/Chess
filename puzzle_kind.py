@@ -4,9 +4,13 @@ the puzzle (puzzles.solution_ucis / solution_moves / kind):
   - Attacking: the solution is a forced mate or a forcing sequence (checks,
     captures, new threats) that wins material — the rule Spot the Tactic and
     multi-move puzzles use (spot.solution_for / spot.forcing_win).
-  - Defensive: you're facing a threat and the best move deals with it. Facing
-    a threat = in check, or if you could pass, your opponent would gain at
-    least THREAT_CP (Stockfish, a "null move").
+  - Defensive: you're facing a threat and the best move deals with it
+    quietly — Lichess's "defensive move": no capture, no check, attacks
+    nothing (escaping check counts if it isn't a capture and there were at
+    least 3 ways out). Facing a threat = in check, or if you could pass,
+    your opponent would gain at least THREAT_CP (Stockfish, a "null move").
+  - Counterattack: you're facing a threat and the best answer hits back — a
+    capture, a check, or a move that attacks one of their pieces.
   - Positional: neither — a quiet best move with no tactic to play and no
     threat to answer.
 
@@ -28,8 +32,9 @@ import chess.engine
 import spot
 from analyzer import _score_to_cp
 
-ATTACKING, DEFENSIVE, POSITIONAL = "Attacking", "Defensive", "Positional"
-KINDS = (ATTACKING, DEFENSIVE, POSITIONAL)
+ATTACKING, DEFENSIVE, COUNTERATTACK, POSITIONAL = "Attacking", "Defensive", "Counterattack", "Positional"
+KINDS = (ATTACKING, DEFENSIVE, COUNTERATTACK, POSITIONAL)
+VERSION = "2"              # settings 'puzzle_kind_version': 2 = Counterattack split out of Defensive
 SOLUTION_DEPTH = 16        # same as the puzzle tab's on-the-fly line
 THREAT_DEPTH = 12
 THREAT_CP = 150
@@ -65,7 +70,7 @@ def classify(engine: chess.engine.SimpleEngine, fen: str, best_uci: str) -> Resu
     if attacking:
         return Result(solution, ATTACKING)
     if board.is_check():
-        return Result(solution, DEFENSIVE)
+        return Result(solution, answer_kind(board, best))
     # a threat: what would the opponent get if you could pass?
     now = _score_to_cp(info["score"], board.turn)
     passed = board.copy(stack=False)
@@ -74,8 +79,43 @@ def classify(engine: chess.engine.SimpleEngine, fen: str, best_uci: str) -> Resu
     if passed.is_valid():
         after = engine.analyse(passed, chess.engine.Limit(depth=THREAT_DEPTH))
         if now - _score_to_cp(after["score"], board.turn) >= THREAT_CP:
-            return Result(solution, DEFENSIVE)
+            return Result(solution, answer_kind(board, best))
     return Result(solution, POSITIONAL)
+
+
+def answer_kind(board: chess.Board, best: chess.Move) -> str:
+    """Facing a threat: Defensive if the best move is quiet, Counterattack if
+    it hits back (Lichess's defensiveMove / check-escape rules)."""
+    if board.is_capture(best):
+        return COUNTERATTACK
+    if board.is_check() and board.legal_moves.count() < 3:
+        return COUNTERATTACK            # a forced reply, not a precise defensive find
+    after = board.copy(stack=False)
+    after.push(best)
+    if after.is_check():
+        return COUNTERATTACK
+    for square in after.attacks(best.to_square):
+        piece = after.piece_at(square)
+        if piece and piece.color == after.turn:     # attacks one of their pieces (pawns too, like Lichess)
+            return COUNTERATTACK
+    return DEFENSIVE
+
+
+def relabel_defensive(conn: sqlite3.Connection) -> int:
+    """One-off (VERSION 2): splits Counterattack out of the saved Defensive
+    puzzles — no engine needed, it only looks at the best move. Returns how
+    many changed."""
+    changed = []
+    for pid, fen, best in conn.execute("SELECT id, fen, correct_move_uci FROM puzzles WHERE kind = ?", (DEFENSIVE,)):
+        try:
+            board = chess.Board(fen)
+            if answer_kind(board, chess.Move.from_uci(best)) == COUNTERATTACK:
+                changed.append((COUNTERATTACK, pid))
+        except ValueError:
+            continue
+    with conn:
+        conn.executemany("UPDATE puzzles SET kind = ? WHERE id = ?", changed)
+    return len(changed)
 
 
 def save(conn: sqlite3.Connection, puzzle_id: str, result: Result) -> None:

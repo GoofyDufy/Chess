@@ -17,10 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import analyzer  # noqa: E402
 import db  # noqa: E402
 import explorer  # noqa: E402
+import lichess_puzzles  # noqa: E402
 import opening_importer  # noqa: E402
 import opening_tree  # noqa: E402
 import progression  # noqa: E402
 import puzzle_kind  # noqa: E402
+import puzzle_tags  # noqa: E402
 import spot  # noqa: E402
 import repertoire_gaps  # noqa: E402
 from drill import OpeningDrillSession  # noqa: E402
@@ -475,6 +477,22 @@ class PuzzleKindTests(unittest.TestCase):
         calm = FakeEngine({key: [(["e2e4"], 20)], self.passed_key(fen): [([], -10)]})
         self.assertEqual(puzzle_kind.classify(calm, fen, "e2e4").kind, "Positional")
 
+    def test_hitting_back_is_counterattack_quiet_is_defensive(self):
+        # Black's queen on d5 is attacked by Nc3; the answer hits back or just steps away
+        board = chess.Board("4k3/8/8/3q4/8/2N5/8/4K3 b - - 0 1")
+        self.assertEqual(puzzle_kind.answer_kind(board, chess.Move.from_uci("d5e5")), "Counterattack")  # check
+        self.assertEqual(puzzle_kind.answer_kind(board, chess.Move.from_uci("d5c4")), "Counterattack")  # hits c3
+        self.assertEqual(puzzle_kind.answer_kind(board, chess.Move.from_uci("d5d8")), "Defensive")      # quiet
+
+    def test_relabel_splits_saved_defensive_puzzles(self):
+        conn = fresh_conn()
+        fen = "rnb1kbnr/ppp1pppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR b KQkq - 1 3"
+        a = analyzer.puzzles_from_evaluations([ev(0, fen, "d5d4", "d5e5", 0, -900)], 150)[0]
+        db.replace_puzzles_for_games(conn, ["g1"], [a])
+        puzzle_kind.save(conn, a.id, puzzle_kind.Result([chess.Move.from_uci("d5e5")], "Defensive"))
+        self.assertEqual(puzzle_kind.relabel_defensive(conn), 1)
+        self.assertEqual(db.all_puzzles(conn)[0].kind, "Counterattack")
+
     def test_saved_and_read_back(self):
         conn = fresh_conn()
         p = analyzer.puzzles_from_evaluations([ev(0, START, "e2e4", "d2d4", 30, -200)], 150)[0]
@@ -605,6 +623,71 @@ class SpotTheTacticTests(unittest.TestCase):
         self.assertEqual((s.rounds, s.spotted, s.tactics, s.false_alarms, s.quiet, s.moves_ok), (3, 1, 2, 1, 1, 2))
         self.assertEqual(spot.xp(conn), 1 * spot.CALL_XP + 2 * spot.MOVE_XP)
         self.assertEqual(progression.total_xp(conn), spot.xp(conn))
+
+
+LICHESS_CSV = """PuzzleId,FEN,Moves,Rating,RatingDeviation,Popularity,NbPlays,Themes,GameUrl,OpeningTags
+00008,r6k/pp2r2p/4Rp1Q/3p4/8/1N1P2R1/PqP2bPP/7K b - - 0 24,f2g3 e6e7 b2b1 b3c1 b1c1 h6c1,1811,76,95,10282,crushing hangingPiece long middlegame,https://lichess.org/787zsVup/black#48,
+0000D,5rk1/1p3ppp/pq3b2/8/8/1P1Q1N2/P4PPP/3R2K1 w - - 2 27,d3d6 f8d8 d6d8 f6d8,1529,74,96,37506,advantage endgame short,https://lichess.org/F8M8OS71#53,
+0000H,r4rk1/pp3ppp/8/2bqp2b/3N4/P2Bn2P/1PPN1P2/R1BQ1RK1 w - - 1 15,d1h5 d5g2,1554,223,100,11,mate mateIn1 middlegame oneMove,https://lichess.org/EwHRkfas#29,French_Defense French_Defense_Tarrasch_Variation
+"""
+
+
+class LichessPuzzleTests(unittest.TestCase):
+    def download(self, conn, low=1000, high=2000, count=10, skip=()):
+        import io
+        import threading
+        return lichess_puzzles.download(low, high, count, set(skip), lambda b: lichess_puzzles.save(conn, b),
+                                        threading.Event(), open_stream=lambda: io.StringIO(LICHESS_CSV))
+
+    def test_parse_plays_the_setup_move(self):
+        row = LICHESS_CSV.splitlines()[1].split(",")
+        p = lichess_puzzles.parse(row)
+        board = chess.Board(row[1])
+        board.push_uci("f2g3")
+        self.assertEqual(p["fen"], board.fen())
+        self.assertEqual(p["setup_uci"], "f2g3")
+        self.assertEqual(p["solution_ucis"], "e6e7 b2b1 b3c1 b1c1 h6c1")
+
+    def test_import_filters_rating_quality_and_skips_existing(self):
+        conn = fresh_conn()
+        # 0000H has too few plays / too wide a rating deviation
+        self.assertEqual(self.download(conn), 2)
+        self.assertEqual(lichess_puzzles.count(conn), 2)
+        self.assertEqual(self.download(conn, skip=lichess_puzzles.ids(conn)), 0)   # nothing new
+        self.assertEqual(self.download(fresh_conn(), low=1600), 1)                  # only 00008 (1811)
+
+    def test_puzzle_kept_apart_with_type_kind_and_solution(self):
+        conn = fresh_conn()
+        self.download(conn)
+        puzzles = {p.id: p for p in lichess_puzzles.load(conn)}
+        p = puzzles["00008"]
+        self.assertEqual(p.puzzle_type, "Hanging Piece")
+        self.assertEqual(p.kind, "Attacking")
+        self.assertEqual(p.solution_moves, 3)
+        self.assertEqual(p.correct_move_uci, "e6e7")
+        self.assertEqual(db.all_puzzles(conn), [])                     # not among your games' puzzles
+        db.record_attempt(conn, lichess_puzzles.ITEM_TYPE, p.id, True, "correct")
+        self.assertEqual(progression.total_xp(conn), progression.PUZZLE_XP["correct"])
+        self.assertEqual(db.puzzle_records(conn), {})
+        self.assertEqual(db.puzzle_records(conn, lichess_puzzles.ITEM_TYPE)["00008"]["correct"], 1)
+        lichess_puzzles.remove_all(conn)
+        self.assertEqual(lichess_puzzles.count(conn), 0)
+
+    def test_tags_motifs_first_and_yours_survive_a_rebuild(self):
+        conn = fresh_conn()
+        self.download(conn)
+        p = {q.id: q for q in lichess_puzzles.load(conn)}["00008"]
+        self.assertEqual(puzzle_tags.auto_tags(p, False, False),
+                         ["Attacking", "Hanging piece", "Crushing", "3 moves", "Middlegame"])
+        own = analyzer.puzzles_from_evaluations([ev(0, START, "e2e4", "d2d4", 30, -200)], 150)[0]
+        db.replace_puzzles_for_games(conn, ["g1"], [own])
+        puzzle_tags.add(conn, own, "  Opening   trap ")
+        rebuilt = analyzer.puzzles_from_evaluations([ev(0, START, "e2e4", "d2d4", 30, -200)], 150)[0]
+        self.assertNotEqual(rebuilt.id, own.id)                        # new id, same position
+        self.assertEqual(puzzle_tags.user_tags(conn, rebuilt), ["Opening trap"])
+        self.assertEqual(puzzle_tags.all_user_tags(conn), {"Opening trap": {puzzle_tags.key(own)}})
+        puzzle_tags.remove(conn, rebuilt, "Opening trap")
+        self.assertEqual(puzzle_tags.user_tags(conn, own), [])
 
 
 if __name__ == "__main__":

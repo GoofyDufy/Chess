@@ -162,6 +162,10 @@ def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path or DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    import lichess_puzzles                 # its own table, kept apart from your games' puzzles
+    lichess_puzzles.ensure_schema(conn)
+    import puzzle_tags                     # tags you add to puzzles
+    puzzle_tags.ensure_schema(conn)
     _migrate(conn)
     return conn
 
@@ -501,11 +505,12 @@ def set_attempt_outcome(conn: sqlite3.Connection, attempt_id: int, outcome: str)
     conn.commit()
 
 
-def puzzle_records(conn: sqlite3.Connection) -> Dict[str, Dict[str, int]]:
+def puzzle_records(conn: sqlite3.Connection, item_type: str = "puzzle") -> Dict[str, Dict[str, int]]:
     """puzzle id -> {'correct': n, 'near_best': n, 'missed': n} over every
-    first try ever made (revealed counts as missed)."""
+    first try ever made (revealed counts as missed). item_type 'lichess'
+    for Lichess puzzles."""
     records: Dict[str, Dict[str, int]] = {}
-    for r in conn.execute("SELECT item_id, correct, outcome FROM attempts WHERE item_type = 'puzzle'"):
+    for r in conn.execute("SELECT item_id, correct, outcome FROM attempts WHERE item_type = ?", (item_type,)):
         outcome = attempt_outcome(r)
         rec = records.setdefault(r["item_id"], {"correct": 0, "near_best": 0, "missed": 0})
         rec["missed" if outcome == "revealed" else outcome] += 1

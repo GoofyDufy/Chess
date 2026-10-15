@@ -11,6 +11,7 @@ import queue
 import random
 import threading
 import tkinter as tk
+import webbrowser
 from tkinter import messagebox, simpledialog
 
 import customtkinter as ctk
@@ -25,8 +26,13 @@ import chess.engine
 
 import engine_locator
 import explain
+import engine_ideas
+import explorer
+import lichess_puzzles
 import progression
 import puzzle_kind
+import puzzle_tags
+import tkinter.font as tkfont
 import spot
 import stats
 import style
@@ -34,7 +40,9 @@ import theme
 from play_window import PlayWindow
 from eval_bar import EvalBar
 from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
-from models import TIME_FILTERS, Game, Puzzle
+
+IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move
+from models import TIME_FILTERS, Game, Puzzle, PuzzleSource
 
 TYPE_COLORS = {
     "Missed Mate": theme.ERROR,
@@ -57,7 +65,13 @@ QUIET_ONLY = "Quiet (several good moves)"
 ENDGAMES = "Endgames"
 ALL_KINDS = "All kinds"
 MULTI_STEP = "Multi-step (2+ moves)"
-KIND_OPTIONS = [ALL_KINDS, puzzle_kind.ATTACKING, puzzle_kind.DEFENSIVE, puzzle_kind.POSITIONAL, MULTI_STEP]
+# which puzzles the queue holds: your games' mistakes, Lichess's database, or both
+MY_GAMES, LICHESS, BOTH_SOURCES = "My games", "Lichess", "My games + Lichess"
+SOURCE_OPTIONS = [MY_GAMES, LICHESS, BOTH_SOURCES]
+KIND_OPTIONS = [ALL_KINDS, puzzle_kind.ATTACKING, puzzle_kind.DEFENSIVE, puzzle_kind.COUNTERATTACK,
+                puzzle_kind.POSITIONAL, MULTI_STEP]
+CARD_CONTENT_WIDTH = 520    # the board card's inside width
+TAG_PREFIX = "Tag: "        # Type filter entries for the tags you've added
 
 DEFAULT_THRESHOLD_PAWNS = "1.5"
 DEFAULT_GAMES_PER_RUN = "50"
@@ -103,14 +117,6 @@ def _record_short(rec: Optional[dict]) -> str:
     return " ".join(parts)
 
 
-def _record_long(rec: Optional[dict]) -> str:
-    if not rec or not sum(rec.values()):
-        return "First time on this puzzle"
-    tries = sum(rec.values())
-    return (f"Your record: {tries} {'try' if tries == 1 else 'tries'} — ✓ {rec['correct']} correct · "
-            f"◐ {rec['near_best']} near-best · ✗ {rec['missed']} missed")
-
-
 def _swing_text(p: Puzzle) -> str:
     """Short label for how costly the mistake was, e.g. '-1.5' or 'allowed mate'."""
     if p.eval_after_cp is not None and p.eval_after_cp <= -analyzer.MATE_CP:
@@ -143,7 +149,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._run_attempt_id: Optional[int] = None  # the saved first try, for the whole sequence
         self._pays_xp = False
         # puzzle id -> {'correct', 'near_best', 'missed'} counts over every first try
-        self.records = db.puzzle_records(conn)
+        self.records = {**db.puzzle_records(conn), **db.puzzle_records(conn, lichess_puzzles.ITEM_TYPE)}
         self.queue: List[Puzzle] = []
         self.queue_index: int = -1
         self.current_puzzle: Optional[Puzzle] = None
@@ -166,6 +172,9 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.import_page = ctk.CTkFrame(master, fg_color="transparent")
         # new puzzles get their kind / solution worked out in the background (puzzle_kind.py)
         self._classify_stop: Optional[threading.Event] = None
+        if db.get_setting(conn, "puzzle_kind_version") != puzzle_kind.VERSION:
+            puzzle_kind.relabel_defensive(conn)
+            db.set_setting(conn, "puzzle_kind_version", puzzle_kind.VERSION)
         self._build_layout()
         self._refresh_game_summary()
         self._reload_queue()
@@ -195,17 +204,24 @@ class PuzzleReviewTab(ctk.CTkFrame):
         left.pack(side="left", padx=(24, 12), pady=24, anchor="n")
         board_pad = ctk.CTkFrame(left, fg_color="transparent")
         board_pad.pack(padx=18, pady=16)
+        # a steady width (room for the tags row), whatever the game line's length
+        ctk.CTkFrame(board_pad, width=CARD_CONTENT_WIDTH, height=0, fg_color="transparent").pack()
 
         header = ctk.CTkFrame(board_pad, fg_color="transparent")
         header.pack(fill="x", pady=(0, 8))
         theme.button(header, "Play it out", self._play_it_out, height=28, width=96).pack(side="right")
-        theme.button(header, "Review game", self._review_game, height=28, width=104).pack(
-            side="right", padx=(0, 6))
+        self.review_button = theme.button(header, "Review game", self._review_game, height=28, width=104)
+        self.review_button.pack(side="right", padx=(0, 6))
         self.game_label = theme.label(header, "", "muted", wraplength=300)
         self.game_label.pack(side="left", fill="x")
         # your history on this puzzle: every first try, right / near-best / missed
-        self.record_label = theme.label(board_pad, "", "muted", wraplength=BOARD_PIXELS)
-        self.record_label.pack(anchor="w", pady=(0, 6))
+        tag_row = ctk.CTkFrame(board_pad, fg_color="transparent", height=22)
+        tag_row.pack(fill="x", pady=(0, 6))
+        self.record_label = theme.label(tag_row, "", "muted")
+        self.record_label.pack(side="right")
+        self.tags_frame = ctk.CTkFrame(tag_row, fg_color="transparent")
+        self.tags_frame.pack(side="left", fill="x", expand=True)
+        self._tag_font = tkfont.Font(font=theme.FONT_SMALL)
 
         board_row = ctk.CTkFrame(board_pad, fg_color="transparent")
         board_row.pack()
@@ -223,6 +239,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
         # step through the main line (packed once the puzzle is solved or revealed)
         self.line_back_button = theme.button(button_row, "◀", lambda: self._step_line(-1), width=36)
         self.line_fwd_button = theme.button(button_row, "▶", lambda: self._step_line(+1), width=36)
+        # after a puzzle: analyse the position yourself, Stockfish alongside (shown with ◀ ▶)
+        self.study_button = theme.button(button_row, "Analyze", self._toggle_analysis, width=84)
         self.retry_button = theme.button(button_row, "Try again", self._on_retry, width=100)
         self.reveal_button = theme.button(button_row, "Show answer", self._on_reveal, width=120)
         # retry/reveal are packed only after a wrong attempt
@@ -235,6 +253,34 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.status_label.pack(pady=(10, 0), anchor="w")
         self.explanation_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
         self.explanation_label.pack(pady=(2, 0), anchor="w")
+        # self-analysis: Stockfish's top lines, a row each, dot in its arrow's colour
+        self.ideas_frame = ctk.CTkFrame(board_pad, fg_color="transparent")
+        title_row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent")
+        title_row.pack(anchor="w", fill="x")
+        self.ideas_title = theme.label(title_row, "", "status", height=20)
+        self.ideas_title.pack(side="left")
+        self.ideas_header = theme.label(title_row, "", "muted", height=20)
+        self.ideas_header.pack(side="left", padx=(10, 0))
+        self._idea_rows = []
+        for i, rank in enumerate(("Best", "2nd", "3rd")):
+            row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
+            dot = ctk.CTkLabel(row, text=f"● {rank}", width=46, height=20, anchor="w", font=theme.FONT_BOLD,
+                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
+            dot.pack(side="left")
+            text = theme.label(row, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2", height=20)
+            text.pack(side="left", fill="x")
+            for widget in (row, dot, text):
+                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
+            self._idea_rows.append((row, text))
+        self._analysis = False
+        self._ana_board: Optional[chess.Board] = None
+        self._ana_start = 0                      # moves on the analysis board you can't take back
+        self._ana_ahead: List[chess.Move] = []   # rest of a Stockfish line being followed
+        self._ana_fen: Optional[str] = None
+        self._ana_title = ""
+        self._ideas: list = []
+        self._ideas_engine = engine_ideas.IdeasEngine(self, self._on_ideas, self._on_ideas_error)
+        self.bind("<Destroy>", lambda e: self._ideas_engine.stop(), add="+")
 
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
@@ -244,8 +290,11 @@ class PuzzleReviewTab(ctk.CTkFrame):
         theme.label(self.import_page, "Download games from chess.com, then let Stockfish find your "
                                       "mistakes. They become puzzles in Puzzle Review.", "muted").pack(
             anchor="w", padx=24, pady=(0, 12))
-        games_card = theme.card(self.import_page)
-        games_card.pack(anchor="nw", padx=24)
+        cards = ctk.CTkFrame(self.import_page, fg_color="transparent")
+        cards.pack(anchor="nw", padx=24)
+        games_card = theme.card(cards)
+        games_card.pack(side="left", anchor="n")
+        self._build_lichess_card(cards)
         games = ctk.CTkFrame(games_card, fg_color="transparent")
         games.pack(fill="x", padx=18, pady=16)
 
@@ -337,6 +386,15 @@ class PuzzleReviewTab(ctk.CTkFrame):
         )
         self.type_filter_dropdown.pack(side="right")
 
+        source_row = ctk.CTkFrame(queue_box, fg_color="transparent")
+        source_row.pack(fill="x", pady=(0, 8))
+        theme.label(source_row, "Puzzles", "muted").pack(side="left")
+        self.source_var = tk.StringVar(value=db.get_setting(self.conn, "puzzle_source") or MY_GAMES)
+        if self.source_var.get() not in SOURCE_OPTIONS:
+            self.source_var.set(MY_GAMES)
+        theme.option_menu(source_row, SOURCE_OPTIONS, self.source_var, lambda _: self._on_source_filter(),
+                          width=230).pack(side="right")
+
         kind_row = ctk.CTkFrame(queue_box, fg_color="transparent")
         kind_row.pack(fill="x", pady=(0, 8))
         theme.label(kind_row, "Kind", "muted").pack(side="left")
@@ -375,6 +433,268 @@ class PuzzleReviewTab(ctk.CTkFrame):
         scrollbar.pack(side="left", fill="y", pady=8)
         self.queue_listbox.bind("<<ListboxSelect>>", self._on_queue_select)
 
+    # ---------- Lichess puzzles (lichess_puzzles.py) ----------
+
+    def _build_lichess_card(self, parent) -> None:
+        card = theme.card(parent)
+        card.pack(side="left", anchor="n", padx=(16, 0))
+        box = ctk.CTkFrame(card, fg_color="transparent")
+        box.pack(fill="x", padx=18, pady=16)
+        theme.label(box, "Lichess puzzles", "heading").pack(anchor="w")
+        theme.label(box, "Free puzzles from the Lichess database, kept apart from your own: pick them "
+                         "with Puzzle Review's Puzzles dropdown. They earn XP but don't change your "
+                         "stats or weak spots.", "muted", wraplength=300).pack(anchor="w", pady=(6, 10))
+        self.lichess_summary = theme.label(box, "", "body", wraplength=300)
+        self.lichess_summary.pack(anchor="w", pady=(0, 10))
+
+        low, high = lichess_puzzles.default_range(explorer.my_recent_rating(self.conn))
+        self.li_min_var = tk.StringVar(value=db.get_setting(self.conn, "lichess_min_rating") or str(low))
+        self.li_max_var = tk.StringVar(value=db.get_setting(self.conn, "lichess_max_rating") or str(high))
+        self.li_count_var = tk.StringVar(value=db.get_setting(self.conn, "lichess_count")
+                                         or str(lichess_puzzles.DEFAULT_COUNT))
+        rating_row = ctk.CTkFrame(box, fg_color="transparent")
+        rating_row.pack(fill="x", pady=3)
+        theme.label(rating_row, "Rating").pack(side="left")
+        theme.entry(rating_row, self.li_min_var, width=64).pack(side="left", padx=(10, 6))
+        theme.label(rating_row, "to", "muted").pack(side="left")
+        theme.entry(rating_row, self.li_max_var, width=64).pack(side="left", padx=6)
+        count_row = ctk.CTkFrame(box, fg_color="transparent")
+        count_row.pack(fill="x", pady=3)
+        theme.label(count_row, "How many").pack(side="left")
+        theme.entry(count_row, self.li_count_var, width=74).pack(side="left", padx=10)
+        theme.label(count_row, "puzzles", "muted").pack(side="left")
+
+        self.li_add_button = theme.button(box, "Add Lichess puzzles", self._add_lichess_puzzles, "primary")
+        self.li_add_button.pack(fill="x", pady=(12, 6))
+        self.li_stop_button = theme.button(box, "Stop (keeps what's added)", self._stop_lichess)
+        self.li_progress = theme.label(box, "", "muted", wraplength=300)
+        self.li_progress.pack(anchor="w")
+        self.li_remove_button = theme.button(box, "Remove all Lichess puzzles", self._remove_lichess_puzzles)
+        self.li_remove_button.pack(fill="x", pady=(6, 0))
+        self._li_stop: Optional[threading.Event] = None
+        self._refresh_lichess_summary()
+
+    def _refresh_lichess_summary(self) -> None:
+        n = lichess_puzzles.count(self.conn)
+        if n:
+            low, high = lichess_puzzles.rating_span(self.conn)
+            text = f"{n:,} puzzles added, rated {low}–{high}."
+        else:
+            text = "None added yet."
+        self.lichess_summary.configure(text=text)
+
+    def _add_lichess_puzzles(self) -> None:
+        if self._li_stop is not None:
+            return
+        try:
+            low, high, count = int(self.li_min_var.get()), int(self.li_max_var.get()), int(self.li_count_var.get())
+            if low > high or count <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Lichess puzzles", "Enter a rating range (low to high) and how many puzzles.",
+                                 parent=self.winfo_toplevel())
+            return
+        for key, value in (("lichess_min_rating", low), ("lichess_max_rating", high), ("lichess_count", count)):
+            db.set_setting(self.conn, key, str(value))
+        skip = lichess_puzzles.ids(self.conn)          # read here: only the main thread touches the DB
+        stop = threading.Event()
+        self._li_stop = stop
+        self.li_add_button.configure(state="disabled")
+        self.li_remove_button.configure(state="disabled")
+        self.li_stop_button.pack(fill="x", pady=(0, 6), before=self.li_progress)
+        self.li_progress.configure(text="Connecting to database.lichess.org…")
+
+        def on_batch(batch):
+            self._ui_queue.put(lambda: lichess_puzzles.save(self.conn, batch))
+
+        def on_progress(found, scanned):
+            self._ui_queue.put(lambda: self.li_progress.configure(
+                text=f"{found:,} of {count:,} found · {scanned:,} Lichess puzzles checked"))
+
+        def worker():
+            error = None
+            try:
+                found = lichess_puzzles.download(low, high, count, skip, on_batch, stop, on_progress)
+            except Exception as e:                      # no network, Lichess down, …
+                found, error = 0, e
+            self._ui_queue.put(lambda: self._lichess_done(found, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _stop_lichess(self) -> None:
+        if self._li_stop is not None:
+            self._li_stop.set()
+            self.li_progress.configure(text="Stopping…")
+
+    def _lichess_done(self, found: int, error) -> None:
+        stopped = self._li_stop is not None and self._li_stop.is_set()
+        self._li_stop = None
+        self.li_stop_button.pack_forget()
+        self.li_add_button.configure(state="normal")
+        self.li_remove_button.configure(state="normal")
+        if error is not None:
+            self.li_progress.configure(text=f"Couldn't download from Lichess ({type(error).__name__}). "
+                                            "Check the internet connection and try again.")
+        else:
+            self.li_progress.configure(text=f"Added {found:,} puzzles" + (" (stopped)." if stopped else ".")
+                                       + (" Choose Lichess in Puzzle Review's Puzzles dropdown."
+                                          if self.source_var.get() == MY_GAMES and found else ""))
+        self._refresh_lichess_summary()
+        if found and self.source_var.get() != MY_GAMES:
+            self._reload_queue()
+
+    def _remove_lichess_puzzles(self) -> None:
+        n = lichess_puzzles.count(self.conn)
+        if not n or not messagebox.askyesno(
+                "Lichess puzzles", f"Remove all {n:,} Lichess puzzles? Your XP from them is kept.",
+                parent=self.winfo_toplevel()):
+            return
+        lichess_puzzles.remove_all(self.conn)
+        self.li_progress.configure(text="Removed.")
+        self._refresh_lichess_summary()
+        if self.source_var.get() != MY_GAMES:
+            self._reload_queue()
+
+    # ---------- tags (puzzle_tags.py) ----------
+
+    def _refresh_tags(self) -> None:
+        """Chips for the puzzle's tags and yours (amber, click to remove), then
+        "+ Tag". What doesn't fit goes into "+N", which opens the tag picker."""
+        for w in self.tags_frame.winfo_children():
+            w.destroy()
+        p = self.current_puzzle
+        if p is None:
+            return
+        sharp = style.puzzle_sharpness(self.conn, [p]).get(p.id, False)
+        auto = puzzle_tags.auto_tags(p, sharp, stats.is_endgame(p.fen))
+        mine = [t for t in puzzle_tags.user_tags(self.conn, p) if t.lower() not in {a.lower() for a in auto}]
+        self._shown_tags = (auto, mine)
+        room = (self.tags_frame.master.winfo_width() if self.tags_frame.master.winfo_width() > 50
+                else BOARD_PIXELS + 30)
+        room -= self._tag_font.measure(self.record_label.cget("text") or "You: ✓0 ◐0 ✗0") + 12
+        room -= self._chip_width("+ Tag") + 4
+        # the kind first, then yours (so they're never the ones hidden), then the rest
+        chips = [(t, False) for t in auto[:1]] + [(t, True) for t in mine] + [(t, False) for t in auto[1:]]
+        used, hidden = 0, 0
+        for i, (tag, yours) in enumerate(chips):
+            text = f"{tag}  ×" if yours else tag
+            need = self._chip_width(text) + 4
+            more = len(chips) - i - 1
+            if used + need + (self._chip_width(f"+{more}") + 4 if more else 0) > room:
+                hidden = len(chips) - i
+                break
+            self._make_chip(text, yours, (lambda t=tag: self._remove_tag(t)) if yours else None)
+            used += need
+        if hidden:
+            self._make_chip(f"+{hidden}", False, self._open_tag_menu)
+        self._make_chip("+ Tag", True, self._open_tag_menu, add=True)
+
+    def _chip_width(self, text: str) -> int:
+        return self._tag_font.measure(text) + 16
+
+    def _make_chip(self, text: str, yours: bool, command=None, add: bool = False):
+        chip = ctk.CTkLabel(self.tags_frame, text=text, height=20, width=self._chip_width(text),
+                            corner_radius=8, font=theme.FONT_SMALL,
+                            fg_color="transparent" if add else theme.CONTROL_BG if yours else theme.PANEL_ALT,
+                            text_color=theme.ACCENT if yours else theme.TEXT_SOFT,
+                            cursor="hand2" if command else "")
+        chip.pack(side="left", padx=(0, 4))
+        if command:
+            chip.bind("<Button-1>", lambda e: command())
+        self._last_chip = chip
+        return chip
+
+    def _open_tag_menu(self) -> None:
+        """A small window: this puzzle's tags, then tag buttons to click on /
+        off (amber = yours) and a box to type your own. Stays open until Done."""
+        if self.current_puzzle is None:
+            return
+        self._close_tag_picker()
+        auto, _ = self._shown_tags
+        win = ctk.CTkToplevel(self)
+        win.title("Tags")
+        win.configure(fg_color=theme.BG)
+        win.resizable(False, False)
+        win.transient(self.winfo_toplevel())
+        win.protocol("WM_DELETE_WINDOW", self._close_tag_picker)
+        win.bind("<Escape>", lambda e: self._close_tag_picker())
+        self._tag_picker = win
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=18, pady=16)
+        theme.label(body, "THIS PUZZLE", "section").pack(anchor="w")
+        theme.label(body, ", ".join(auto) or "No tags yet", "body", wraplength=440).pack(anchor="w", pady=(2, 12))
+        theme.label(body, "YOUR TAGS — click to add or remove", "section").pack(anchor="w", pady=(0, 6))
+        self._picker_grid = ctk.CTkFrame(body, fg_color="transparent")
+        self._picker_grid.pack(anchor="w")
+        self._fill_tag_picker()
+
+        add_row = ctk.CTkFrame(body, fg_color="transparent")
+        add_row.pack(fill="x", pady=(12, 0))
+        self._new_tag_var = tk.StringVar()
+        theme.label(add_row, "Your own", "muted").pack(side="left", padx=(0, 8))
+        entry = theme.entry(add_row, self._new_tag_var, width=200)
+        entry.pack(side="left")
+        entry.bind("<Return>", lambda e: self._add_typed_tag())
+        theme.button(add_row, "Add", self._add_typed_tag, height=32, width=64).pack(side="left", padx=(8, 0))
+        theme.button(add_row, "Done", self._close_tag_picker, "primary", height=32, width=72).pack(side="right")
+
+        win.update_idletasks()
+        x = min(self._last_chip.winfo_rootx(), win.winfo_screenwidth() - win.winfo_reqwidth() - 10)
+        y = min(self._last_chip.winfo_rooty() + 26, win.winfo_screenheight() - win.winfo_reqheight() - 40)
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.after(50, lambda: (win.lift(), entry.focus_set()))
+
+    def _fill_tag_picker(self) -> None:
+        for w in self._picker_grid.winfo_children():
+            w.destroy()
+        auto, mine = self._shown_tags
+        have = {t.lower() for t in auto}
+        offered = [t for t in puzzle_tags.SUGGESTED if t.lower() not in have]
+        offered += [t for t in mine if t not in puzzle_tags.SUGGESTED]
+        for i, tag in enumerate(offered):
+            on = tag in mine
+            ctk.CTkButton(
+                self._picker_grid, text=tag, height=28, width=104, corner_radius=8, font=theme.FONT_SMALL,
+                fg_color=theme.ACCENT if on else theme.PANEL_ALT, hover_color=theme.ACCENT_HOVER if on else theme.CONTROL_BG,
+                text_color=theme.ACCENT_TEXT if on else theme.TEXT_SOFT, border_width=0,
+                command=lambda t=tag, on=on: self._toggle_tag(t, not on),
+            ).grid(row=i // 4, column=i % 4, padx=(0, 6), pady=(0, 6), sticky="w")
+
+    def _close_tag_picker(self) -> None:
+        win = getattr(self, "_tag_picker", None)
+        self._tag_picker = None
+        if win is not None and win.winfo_exists():
+            win.destroy()
+
+    def _add_typed_tag(self) -> None:
+        tag = self._new_tag_var.get().strip()
+        if tag and self.current_puzzle is not None:
+            puzzle_tags.add(self.conn, self.current_puzzle, tag)
+            self._new_tag_var.set("")
+            self._tags_changed()
+
+    def _toggle_tag(self, tag: str, on: bool) -> None:
+        (puzzle_tags.add if on else puzzle_tags.remove)(self.conn, self.current_puzzle, tag)
+        self._tags_changed()
+
+    def _remove_tag(self, tag: str) -> None:
+        puzzle_tags.remove(self.conn, self.current_puzzle, tag)
+        self._tags_changed()
+
+    def _tags_changed(self) -> None:
+        self._refresh_tags()
+        if getattr(self, "_tag_picker", None) is not None and self._tag_picker.winfo_exists():
+            self._fill_tag_picker()
+        # the Type filter's tag list (without rebuilding the queue you're in)
+        self._user_tags = puzzle_tags.all_user_tags(self.conn)
+        values = [v for v in self.type_filter_dropdown.cget("values") if not v.startswith(TAG_PREFIX)]
+        self.type_filter_dropdown.configure(
+            values=values + [TAG_PREFIX + t for t in sorted(self._user_tags, key=str.lower)])
+
+    def _on_source_filter(self) -> None:
+        db.set_setting(self.conn, "puzzle_source", self.source_var.get())
+        self._reload_queue()
+
     def _on_kind_filter(self) -> None:
         db.set_setting(self.conn, "puzzle_kind_filter", self.kind_var.get())
         self._reload_queue()
@@ -409,22 +729,37 @@ class PuzzleReviewTab(ctk.CTkFrame):
         """Rebuilds the queue from the database — call after analyzing new
         games or changing the type filter. Randomly ordered, no due-date
         gating: every generated puzzle is browsable."""
-        types = db.distinct_puzzle_types(self.conn)
-        options = ["All types", WEAK_SPOTS, ENDGAMES] + types
+        source = self.source_var.get()
+        mine, lichess = source != LICHESS, source != MY_GAMES
+        types = set(db.distinct_puzzle_types(self.conn)) if mine else set()
+        if lichess:
+            types |= {lichess_puzzles.puzzle_type((r[0] or "").split())
+                      for r in self.conn.execute("SELECT DISTINCT themes FROM lichess_puzzles")}
+        self._user_tags = puzzle_tags.all_user_tags(self.conn)
+        options = (["All types", WEAK_SPOTS, ENDGAMES] + sorted(types)
+                   + [TAG_PREFIX + t for t in sorted(self._user_tags, key=str.lower)])
         self.type_filter_dropdown.configure(values=options)
         if self.type_filter_var.get() not in options:
             self.type_filter_var.set("All types")
 
         selected_type = self.type_filter_var.get()
-        filter_type = None if selected_type in ("All types", WEAK_SPOTS, ENDGAMES) else selected_type
-        self.queue = db.all_puzzles(self.conn, puzzle_type=filter_type,
-                                    time_classes=self._focus_classes())
+        filter_type = (None if selected_type in ("All types", WEAK_SPOTS, ENDGAMES)
+                       or selected_type.startswith(TAG_PREFIX) else selected_type)
+        self.queue = (db.all_puzzles(self.conn, puzzle_type=filter_type, time_classes=self._focus_classes())
+                      if mine else [])
+        if lichess:            # the Games (time control) filter is about your games only
+            self.queue += lichess_puzzles.load(self.conn, filter_type)
+            if mine:
+                random.shuffle(self.queue)
         if selected_type == WEAK_SPOTS:
             # puzzles you keep missing, weakest first (solve twice in a row to clear one)
-            weak = db.weak_item_ids(self.conn, "puzzle")
+            weak = {**db.weak_item_ids(self.conn, "puzzle"), **db.weak_item_ids(self.conn, lichess_puzzles.ITEM_TYPE)}
             self.queue = sorted((p for p in self.queue if p.id in weak), key=lambda p: -weak[p.id])
         elif selected_type == ENDGAMES:
             self.queue = [p for p in self.queue if stats.is_endgame(p.fen)]
+        elif selected_type.startswith(TAG_PREFIX):
+            keys = self._user_tags.get(selected_type[len(TAG_PREFIX):], set())
+            self.queue = [p for p in self.queue if puzzle_tags.key(p) in keys]
         kind = self.kind_var.get()
         if kind == MULTI_STEP:
             self.queue = [p for p in self.queue if (p.solution_moves or 0) > 1]
@@ -440,6 +775,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
                         "solve them twice in a row.",
             ENDGAMES: "No endgame puzzles in this filter yet.",
         }.get(selected_type, "No puzzles match these filters." if position != ALL_POSITIONS or kind != ALL_KINDS else
+               "No Lichess puzzles yet. Add some on Import & Analyze → Lichess puzzles." if source == LICHESS else
                "No puzzles yet. Import your games, then click Analyze new games.")
 
         self._refresh_listbox()
@@ -449,6 +785,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
             self.queue_index = -1
             self.current_puzzle = None
             self.current_game = None
+            self._refresh_tags()
             self.board_widget.clear()
             self.game_label.configure(text="")
             self.record_label.configure(text="")
@@ -460,7 +797,11 @@ class PuzzleReviewTab(ctk.CTkFrame):
         p = self.queue[index]
         check = "✓ " if p.id in self.solved_ids else "   "
         record = _record_short(self.records.get(p.id))
-        return (f"{check}{index + 1}.  {p.puzzle_type or 'Puzzle'}  ({_swing_text(p)})"
+        if p.source == PuzzleSource.LICHESS:        # its rating; "Li" marks it in a mixed queue
+            detail = f"Li {p.rating}" if self.source_var.get() == BOTH_SOURCES else str(p.rating)
+        else:
+            detail = _swing_text(p)
+        return (f"{check}{index + 1}.  {p.puzzle_type or 'Puzzle'}  ({detail})"
                 + (f"   {record}" if record else ""))
 
     def _refresh_listbox(self) -> None:
@@ -537,9 +878,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         )
         board = chess.Board(self.current_puzzle.fen)
         # puzzle positions are always your move — show the board from your side
-        self.board_widget.load_fen(self.current_puzzle.fen, flipped=board.turn == chess.BLACK)
+        self._show_start_position(flipped=board.turn == chess.BLACK)
+        self.review_button.configure(text="Open on Lichess" if self._is_lichess() else "Review game",
+                                     width=120 if self._is_lichess() else 104)
         self.game_label.configure(text=self._game_label_text())
         self._update_record_label()
+        self._close_tag_picker()
+        self._refresh_tags()
         self._show_prompt()
         self._set_eval(self.current_puzzle.eval_before_cp)
 
@@ -547,11 +892,36 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.queue_listbox.selection_set(index)
         self.queue_listbox.see(index)
 
+    def _is_lichess(self) -> bool:
+        return self.current_puzzle is not None and self.current_puzzle.source == PuzzleSource.LICHESS
+
+    def _item_type(self) -> str:
+        """attempts.item_type: Lichess tries are kept apart from your games' puzzles."""
+        return lichess_puzzles.ITEM_TYPE if self._is_lichess() else "puzzle"
+
+    def _show_start_position(self, flipped: Optional[bool] = None) -> None:
+        """The puzzle's position; a Lichess puzzle shows the opponent's move
+        that set it up as the last move."""
+        p = self.current_puzzle
+        if p.setup_fen and p.setup_uci:
+            self.board_widget.load_fen(p.setup_fen, flipped=flipped)
+            self.board_widget.board.push(chess.Move.from_uci(p.setup_uci))
+            self.board_widget.redraw()
+        else:
+            self.board_widget.load_fen(p.fen, flipped=flipped)
+
     def _show_prompt(self) -> None:
-        side = "White" if chess.Board(self.current_puzzle.fen).turn == chess.WHITE else "Black"
-        self.status_label.configure(text=f"Find the best move for {side}.", text_color=theme.TEXT)
+        p = self.current_puzzle
+        side = "White" if chess.Board(p.fen).turn == chess.WHITE else "Black"
+        setup = ""
+        if p.setup_fen and p.setup_uci:
+            setup = f"Opponent played {chess.Board(p.setup_fen).san(chess.Move.from_uci(p.setup_uci))}. "
+        self.status_label.configure(text=f"{setup}Find the best move for {side}.", text_color=theme.TEXT)
 
     def _game_label_text(self) -> str:
+        if self._is_lichess():
+            p = self.current_puzzle
+            return f"Lichess puzzle, rated {p.rating}" + (f" — {p.opening}" if p.opening else "")
         if self.current_game is None:
             return ""
         my_username = db.get_setting(self.conn, "chess_com_username") or "You"
@@ -560,16 +930,14 @@ class PuzzleReviewTab(ctk.CTkFrame):
         else:
             white, black = self.current_game.opponent_username, my_username
         played = self.current_game.played_at.strftime("%b %d, %Y")
-        p = self.current_puzzle
-        tags = [t for t in (p.kind, p.puzzle_type) if t]
-        if (p.solution_moves or 0) > 1:
-            tags.append(f"{p.solution_moves} moves")
-        type_tag = " · ".join(tags) + " — " if tags else ""
-        return f"{type_tag}{white} (White) vs {black} (Black) — {played}"
+        return f"{white} (White) vs {black} (Black) — {played}"
 
     # ---------- Attempting a puzzle ----------
 
     def _on_move_attempt(self, move: chess.Move) -> None:
+        if self._analysis:
+            self._analysis_move(move)
+            return
         if self.current_puzzle is None or self.attempt_state != "solving":
             return
         if self._ply > 0:
@@ -585,7 +953,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.board_widget.redraw()
         first_try = not self._attempt_recorded
         # XP is paid once per puzzle per day — only promise a bonus that's real
-        pays_xp = first_try and not db.tried_today(self.conn, "puzzle", self.current_puzzle.id)
+        pays_xp = first_try and not db.tried_today(self.conn, self._item_type(), self.current_puzzle.id)
         if first_try:
             # only the first try counts toward Weak spots / Progress / XP
             outcome = "correct" if correct else "near_best" if rank else "missed"
@@ -623,7 +991,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
     # ---------- move explanations (Stockfish lines + board facts) ----------
 
-    def _explain_solution_async(self) -> None:
+    def _explain_solution_async(self, solved: bool) -> None:
         p = self.current_puzzle
         best = chess.Move.from_uci(p.correct_move_uci)
         try:
@@ -631,21 +999,30 @@ class PuzzleReviewTab(ctk.CTkFrame):
         except ValueError:
             game_move = None
         summary = self._eval_summary()
-        self._load_main_line(p.fen, best)
+        # the line so far: everything you played if solved (the board shows its end),
+        # else the full solution with the board on its first move
+        if solved and self._seq_board is not None and self._seq_board.move_stack:
+            line, shown = list(self._seq_board.move_stack), len(self._seq_board.move_stack)
+        else:
+            line, shown = list(self._solution) or [best], 1
+        self._load_main_line(p.fen, line, shown)
         self.explanation_label.configure(text="Working out the key line…")
         self._explain_async(lambda engine: explain.explain_solution(p.fen, best, game_move, engine)
                             + (f"\n{summary}" if summary else ""))
 
     # ---------- step-through main line ----------
 
-    def _load_main_line(self, fen: str, best: chess.Move) -> None:
-        """Shows ◀ ▶ right away (best move only), then fetches Stockfish's
-        continuation in the background and extends the line."""
+    def _load_main_line(self, fen: str, start: List[chess.Move], shown: int) -> None:
+        """Shows ◀ ▶ right away (the solution so far; the board shows `shown`
+        moves of it), then fetches Stockfish's continuation after it in the
+        background and extends the line."""
         token = object()
         self._line_token = token
-        self._main_line, self._line_index = [best], 1      # the board already shows the best move
+        self._main_line, self._line_index = list(start), shown
         self.line_back_button.pack(side="left", padx=(8, 0))
         self.line_fwd_button.pack(side="left", padx=(6, 0))
+        self.study_button.configure(text="Analyze")
+        self.study_button.pack(side="left", padx=(6, 0))
         self._update_line_buttons()
 
         def worker():
@@ -656,7 +1033,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
                 if path:
                     engine = chess.engine.SimpleEngine.popen_uci(path)
                     board = chess.Board(fen)
-                    board.push(best)
+                    for move in start:
+                        board.push(move)
                     if not board.is_game_over():
                         info = engine.analyse(board, chess.engine.Limit(depth=MAIN_LINE_DEPTH))
                         line = list(info.get("pv", []))[:MAIN_LINE_PLIES]
@@ -671,28 +1049,136 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
             def apply():
                 if self._line_token is token and line:
-                    self._main_line = [best] + line
+                    self._main_line = list(start) + line
                     self._update_line_buttons()
             self._ui_queue.put(apply)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- self-analysis after a puzzle (engine_ideas.py) ----------
+
+    def _toggle_analysis(self) -> None:
+        if self._analysis:
+            self._stop_analysis()
+            self._step_line(0)                  # back to the solution view
+            return
+        if self.current_puzzle is None or self.attempt_state != "done":
+            return
+        self._analysis = True
+        self._ana_board = chess.Board(self.current_puzzle.fen)   # from the puzzle's start
+        self._ana_start = len(self._ana_board.move_stack)
+        self._ana_ahead = list(self._main_line)                  # ▶ walks the solution; any move branches off
+        self.study_button.configure(text="Stop analysis", width=120)
+        for b in (self.line_back_button, self.line_fwd_button):
+            b.configure(state="normal")
+        self.explanation_label.pack_forget()
+        self.ideas_frame.pack(after=self.status_label, anchor="w", fill="x", pady=(10, 0))
+        self.status_label.pack_forget()
+        self._show_analysis_board()
+
+    def _stop_analysis(self) -> None:
+        if not self._analysis:
+            return
+        self._analysis = False
+        self._ana_fen = None
+        self.study_button.configure(text="Analyze", width=84)
+        self.status_label.pack(before=self.ideas_frame, pady=(10, 0), anchor="w")
+        self.ideas_frame.pack_forget()
+        if not self.explanation_label.winfo_manager():
+            self.explanation_label.pack(after=self.status_label, pady=(2, 0), anchor="w")
+
+    def _show_analysis_board(self) -> None:
+        board = self._ana_board
+        self.board_widget.show_board(board.copy())
+        made = len(board.move_stack) - self._ana_start
+        side = "White" if board.turn == chess.WHITE else "Black"
+        self._ana_title = f"{side} to move" + (f" ({made} move{'s' if made != 1 else ''} in)" if made else "")
+        self._ana_fen = board.fen()
+        self._show_ideas("Stockfish is thinking…", [])
+        self.board_widget.set_marked_arrows([])
+        if board.is_game_over():
+            outcome = board.outcome()
+            self._show_ideas("Game over: " + ("draw" if outcome.winner is None else
+                             ("White" if outcome.winner else "Black") + " wins") + ".", [])
+            return
+        self._ideas_engine.analyse(self._ana_fen)
+
+    def _analysis_move(self, move: chess.Move) -> None:
+        if move not in self._ana_board.legal_moves:
+            return
+        self._ana_ahead = self._ana_ahead[1:] if self._ana_ahead and self._ana_ahead[0] == move else []
+        self._ana_board.push(move)
+        self._show_analysis_board()
+
+    def _analysis_step(self, delta: int) -> None:
+        board = self._ana_board
+        if delta < 0:
+            if len(board.move_stack) > self._ana_start:
+                self._ana_ahead.insert(0, board.pop())     # ▶ plays it again
+                self._show_analysis_board()
+            return
+        if delta > 0:
+            move = self._ana_ahead[0] if self._ana_ahead else (self._ideas[0].move if self._ideas else None)
+            if move is not None and move in board.legal_moves:
+                self._analysis_move(move)
+
+    def _follow_idea(self, i: int) -> None:
+        """A Stockfish line clicked: play its first move; ▶ plays on along it."""
+        if not self._analysis or i >= len(self._ideas):
+            return
+        pv = list(self._ideas[i].pv)
+        self._analysis_move(pv[0])
+        self._ana_ahead = pv[1:]
+
+    def _on_ideas(self, fen: str, depth: int, ideas) -> None:
+        if not self._analysis or fen != self._ana_fen:
+            return                                     # moved on / stopped
+        self._ideas = ideas
+        board = chess.Board(fen)
+        if not ideas:
+            return
+        self._show_ideas(f"Stockfish depth {depth} · click a line, then ▶",
+                         [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
+        self.board_widget.set_marked_arrows(
+            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
+        self.eval_bar.set(ideas[0].cp_white, flipped=self.board_widget.flipped)
+
+    def _on_ideas_error(self, message: str) -> None:
+        self._show_ideas(message, [])
+
+    def _show_ideas(self, header: str, rows) -> None:
+        self.ideas_title.configure(text=f"Analysis — {self._ana_title}")
+        self.ideas_header.configure(text=header)
+        for i, (row, text) in enumerate(self._idea_rows):
+            if i < len(rows):
+                text.configure(text=rows[i])
+                row.pack(anchor="w", fill="x")
+            else:
+                row.pack_forget()
 
     def _hide_main_line(self) -> None:
         self._line_token = None
         self._main_line, self._line_index = [], 0
         self.line_back_button.pack_forget()
         self.line_fwd_button.pack_forget()
+        self.study_button.pack_forget()
+        self._stop_analysis()
 
     def _update_line_buttons(self) -> None:
+        if self._analysis:
+            return                               # ◀ ▶ step the analysis board then
         self.line_back_button.configure(state="normal" if self._line_index > 0 else "disabled")
         self.line_fwd_button.configure(
             state="normal" if self._line_index < len(self._main_line) else "disabled")
 
     def _step_line(self, delta: int) -> None:
+        if self._analysis:
+            self._analysis_step(delta)
+            return
         if self.current_puzzle is None or self.attempt_state != "done" or not self._main_line:
             return
         self._line_index = max(0, min(len(self._main_line), self._line_index + delta))
-        self.board_widget.load_fen(self.current_puzzle.fen)
+        self._show_start_position()
         board = self.board_widget.board
         sans = []
         for move in self._main_line[:self._line_index]:
@@ -848,6 +1334,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
                    title=f"Play it out — {self.current_puzzle.puzzle_type or 'puzzle'}")
 
     def _review_game(self) -> None:
+        if self._is_lichess():
+            if self.current_puzzle.game_url:
+                webbrowser.open(self.current_puzzle.game_url)
+            return
         if self.current_puzzle is None or not self.current_puzzle.source_game_id:
             return
         if self.on_review_game:
@@ -855,7 +1345,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
     def _save_first_try(self, correct: bool, outcome: str) -> None:
         pid = self.current_puzzle.id
-        self._attempt_id = db.record_attempt(self.conn, "puzzle", pid, correct, outcome,
+        self._attempt_id = db.record_attempt(self.conn, self._item_type(), pid, correct, outcome,
                                              sharp=self._is_sharp())
         self._attempt_recorded = True
         self._count_outcome(pid, outcome, +1)
@@ -871,7 +1361,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._update_record_label()
 
     def _update_record_label(self) -> None:
-        text = _record_long(self.records.get(self.current_puzzle.id)) if self.current_puzzle else ""
+        rec = self.records.get(self.current_puzzle.id) if self.current_puzzle else None
+        if not self.current_puzzle:
+            text = ""
+        elif not rec or not sum(rec.values()):
+            text = "First try"
+        else:
+            text = f"You: ✓{rec['correct']} ◐{rec['near_best']} ✗{rec['missed']}"
         self.record_label.configure(text=text)
 
     # ---------- multi-move puzzles ----------
@@ -922,7 +1418,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
                 if self._solution_token is not token:
                     return
                 self._solution, self._solution_ready = solution, True
-                self.game_label.configure(text=self._game_label_text())
+                self._refresh_tags()
                 if self.attempt_state == "pending":         # first move already played
                     self._after_correct(chess.Board(p.fen).san(best))
             self._ui_queue.put(apply)
@@ -1005,14 +1501,15 @@ class PuzzleReviewTab(ctk.CTkFrame):
         if not clean:
             text += "  (Found with retries — only a clean first run counts.)"
         self.status_label.configure(text=text, text_color=theme.SUCCESS)
-        # back to the start + the best move, where the arrows and the ◀ ▶ main line begin
-        self.board_widget.load_fen(self.current_puzzle.fen)
-        self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
+        # stay on the position you reached; ◀ steps back through your line
+        self._show_start_position()
+        for move in self._seq_board.move_stack:
+            self.board_widget.board.push(move)
         self.board_widget.redraw()
         self.board_widget.set_marked_arrows(self._game_move_arrows())
         self._set_eval(self.current_puzzle.eval_before_cp)
         self.explanation_label.configure(text=self._explanation_text(correct=True))
-        self._explain_solution_async()
+        self._explain_solution_async(solved=True)
 
     def _on_retry(self) -> None:
         if self.current_puzzle is None:
@@ -1039,7 +1536,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._mark_sequence_missed()
         self._attempt_id = None
         self._hide_retry_buttons()
-        self.board_widget.load_fen(self.current_puzzle.fen)
+        self._show_start_position()
         self.board_widget.board.push(chess.Move.from_uci(self.current_puzzle.correct_move_uci))
         self.board_widget.set_marked_arrows(self._game_move_arrows())
         self._set_eval(self.current_puzzle.eval_before_cp)
@@ -1050,7 +1547,7 @@ class PuzzleReviewTab(ctk.CTkFrame):
                 text=f"The best move was {self.current_puzzle.correct_move_san}.", text_color=theme.TEXT,
             )
         self.explanation_label.configure(text=self._explanation_text(correct=False))
-        self._explain_solution_async()
+        self._explain_solution_async(solved=False)
 
     def _show_retry_buttons(self) -> None:
         self.retry_button.pack(side="left", padx=(8, 0))
@@ -1062,6 +1559,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
     def _explanation_text(self, correct: bool) -> str:
         p = self.current_puzzle
+        if self._is_lichess():
+            themes = lichess_puzzles.nice_themes(p.themes)
+            return (f"A Lichess puzzle rated {p.rating}" + (f" — themes: {themes}" if themes else "") + "."
+                    + (f" Opening: {p.opening}." if p.opening else ""))
         before = _cp_to_pawns(p.eval_before_cp)
         after = _cp_to_pawns(p.eval_after_cp)
         swing_pawns = f"{p.eval_swing_cp / 100:.1f}" if p.eval_swing_cp is not None else "?"
