@@ -24,7 +24,7 @@ import math
 import os
 import queue
 import threading
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import chess
 import chess.engine
@@ -60,6 +60,10 @@ RULES_VERSION = "1"       # settings 'puzzle_cost_version': 1 = the winning-chan
 def win_chances(cp: int) -> float:
     """Lichess's winning chances, -1 (lost) .. 1 (won), from centipawns."""
     return 2 / (1 + math.exp(-0.00368208 * cp)) - 1
+
+
+MISSED_SACRIFICE = "Missed Sacrifice"     # the best move was a sound piece sacrifice (amazing.py)
+RULES_SAC_VERSION = "1"                    # settings 'puzzle_sac_version': missed sacrifices added
 
 
 def chances_lost(cp_before: int, cp_after: int) -> float:
@@ -145,6 +149,8 @@ def apply_chances_rule(conn) -> tuple:
     removed, relabel = [], []
     for pid, before, after, ptype in conn.execute(
             "SELECT id, eval_before_cp, eval_after_cp, puzzle_type FROM puzzles WHERE eval_after_cp IS NOT NULL"):
+        if ptype == MISSED_SACRIFICE:            # its own rule (amazing.missed_sacrifice)
+            continue
         lost = chances_lost(before or 0, after)
         if lost < MIN_CHANCES_LOST:
             removed.append((pid,))
@@ -157,6 +163,36 @@ def apply_chances_rule(conn) -> tuple:
         conn.executemany("DELETE FROM puzzles WHERE id = ?", removed)
         conn.executemany("UPDATE puzzles SET puzzle_type = ? WHERE id = ?", relabel)
     return len(removed), len(relabel)
+
+
+def add_missed_sacrifices(conn) -> Tuple[int, int]:
+    """One-off (RULES_SAC_VERSION): saved puzzles whose answer is a sacrifice you
+    missed become Missed Sacrifice, and missed sacrifices below the blunder size
+    become new puzzles (their kind is worked out in the background). Returns
+    (relabelled, added)."""
+    import amazing
+    import db
+    existing = {(r[0], r[1]): (r[2], r[3]) for r in conn.execute(
+        "SELECT source_game_id, fen, id, puzzle_type FROM puzzles WHERE source_game_id IS NOT NULL")}
+    relabel, new = [], {}
+    for m in amazing.find_missed(conn):
+        hit = existing.get((m.game_id, m.fen))
+        if hit is not None:
+            if hit[1] not in (MISSED_SACRIFICE, "Missed Mate"):
+                relabel.append((MISSED_SACRIFICE, hit[0]))
+            continue
+        board = chess.Board(m.fen)
+        new.setdefault(m.game_id, []).append(Puzzle(
+            fen=m.fen, correct_move_san=m.best_san, correct_move_uci=m.best_uci,
+            source=PuzzleSource.OWN_GAME_MISTAKE, played_move_san=m.played_san,
+            eval_swing_cp=m.cp_before - m.cp_after, eval_before_cp=m.cp_before, eval_after_cp=m.cp_after,
+            puzzle_type=MISSED_SACRIFICE, source_game_id=m.game_id))
+    with conn:
+        conn.executemany("UPDATE puzzles SET puzzle_type = ? WHERE id = ?", relabel)
+        for puzzles in new.values():
+            for p in puzzles:
+                db._insert_puzzle(conn, p)
+    return len(relabel), sum(len(v) for v in new.values())
 
 
 def _my_chess_color(game: Game) -> chess.Color:
@@ -317,6 +353,7 @@ def puzzles_from_evaluations(
     """Pure, engine-free: turns cached evaluations into puzzles at the
     given threshold. Cheap enough to re-run over every game whenever the
     threshold changes."""
+    import amazing                          # (it imports this module: imported here, not at the top)
     puzzles: List[Puzzle] = []
     for ev in evaluations:
         if ev.cp_after is None or ev.best_move_uci is None:
@@ -324,11 +361,15 @@ def puzzles_from_evaluations(
         if ev.best_move_uci == ev.move_uci:
             continue
         swing = ev.cp_before - ev.cp_after
-        if swing < threshold_cp:
-            continue
         lost = chances_lost(ev.cp_before, ev.cp_after)
-        if lost < MIN_CHANCES_LOST:          # the game was decided either way
-            continue
+        # a sound sacrifice you missed is a puzzle even below the blunder size (amazing.py)
+        missed_sac = amazing.missed_sacrifice(ev.fen_before, ev.move_uci, ev.best_move_uci,
+                                              ev.cp_before, ev.cp_after)
+        if not missed_sac:
+            if swing < threshold_cp:
+                continue
+            if lost < MIN_CHANCES_LOST:          # the game was decided either way
+                continue
 
         board = chess.Board(ev.fen_before)
         move = chess.Move.from_uci(ev.move_uci)
@@ -342,7 +383,8 @@ def puzzles_from_evaluations(
             eval_swing_cp=swing,
             eval_before_cp=ev.cp_before,
             eval_after_cp=ev.cp_after,
-            puzzle_type=_classify_puzzle_type(board, move, board.turn, ev.cp_before, swing, lost),
+            puzzle_type=(MISSED_SACRIFICE if missed_sac and ev.cp_before < MATE_CP
+                         else _classify_puzzle_type(board, move, board.turn, ev.cp_before, swing, lost)),
             source_game_id=ev.game_id,
         ))
     return puzzles

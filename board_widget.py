@@ -22,6 +22,9 @@ SCREEN_MARGIN = 110
 BOARD_CARD_EXTRA = 300
 
 
+BADGE_DARK_TEXT = {"#E6A94A", "#8FB3E8", "#7DCB98", "#C9CDD3", "#2DD4BF", "#F472B6"}   # light discs   # light discs: dark text
+
+
 def _fit_square_size() -> int:
     """Full-size squares on big screens; smaller ones when the screen is too
     short to fit the board card (otherwise the buttons under the board get
@@ -102,6 +105,9 @@ class ChessBoardWidget(tk.Canvas):
         # a move to highlight instead of the board's last move (e.g. the
         # opponent's move while a "pass" sits on top of it); reset on load
         self.highlight_move: Optional[chess.Move] = None
+        # move-quality badges, e.g. [(square, "??", "#E8735E")]: a coloured disc in the
+        # square's top-right corner (Game Review); reset on load
+        self.badges: list[tuple[int, str, str]] = []
         self._right_press_square: Optional[int] = None
         self.bind("<Button-1>", self._handle_click)
         # Button-3 is right-click on Windows/Linux; Button-2 on macOS
@@ -119,6 +125,7 @@ class ChessBoardWidget(tk.Canvas):
         self.selected_square = None
         self.legal_targets = set()
         self.highlight_move = None
+        self.badges = []
         self.redraw()
 
     def show_board(self, board: chess.Board, flipped: Optional[bool] = None) -> None:
@@ -134,6 +141,7 @@ class ChessBoardWidget(tk.Canvas):
         self.selected_square = None
         self.legal_targets = set()
         self.highlight_move = None
+        self.badges = []
         self.redraw()
 
     def clear(self) -> None:
@@ -277,6 +285,21 @@ class ChessBoardWidget(tk.Canvas):
                         )
 
         self._draw_annotations()
+        self._draw_badges()
+
+    def set_badges(self, badges) -> None:
+        self.badges = list(badges)
+        self.redraw()
+
+    def _draw_badges(self) -> None:
+        r = max(9, round(SQUARE_SIZE * 0.245))
+        font = ("Arial", max(7, round(r * 0.95)), "bold")
+        for square, text, color in self.badges:
+            cx, cy = self._square_center(square)
+            x, y = cx + SQUARE_SIZE / 2 - r - 1, cy - SQUARE_SIZE / 2 + r + 1    # inside the corner
+            self.create_oval(x - r, y - r, x + r, y + r, fill=color, outline="#111317", width=1.5)
+            self.create_text(x, y, text=text, fill="#FFFFFF" if color not in BADGE_DARK_TEXT else "#111317",
+                             font=font)
 
     def _flash_illegal(self) -> None:
         """Brief red flash on the whole board so an invalid click is

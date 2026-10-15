@@ -47,6 +47,7 @@ from models import TIME_FILTERS, Game, Puzzle, PuzzleSource
 TYPE_COLORS = {
     "Missed Mate": theme.ERROR,
     analyzer.LEFT_HANGING: theme.WARNING,
+    analyzer.MISSED_SACRIFICE: "#F472B6",      # the !! colour
     "Blunder": theme.ERROR,
     "Mistake": theme.INFO,
     "Inaccuracy": theme.TEXT_MUTED,
@@ -177,6 +178,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
             # puzzles must cost real winning chances (analyzer.MIN_CHANCES_LOST)
             analyzer.apply_chances_rule(conn)
             db.set_setting(conn, "puzzle_cost_version", analyzer.RULES_VERSION)
+        if db.get_setting(conn, "puzzle_sac_version") != analyzer.RULES_SAC_VERSION:
+            # sacrifices you missed: labelled, and added below the blunder size too
+            analyzer.add_missed_sacrifices(conn)
+            db.set_setting(conn, "puzzle_sac_version", analyzer.RULES_SAC_VERSION)
         if db.get_setting(conn, "puzzle_rules_version") != puzzle_kind.RULES_VERSION:
             # new tactic rules: every puzzle is classified again in the background
             puzzle_kind.reset_for_new_rules(conn)
@@ -1702,6 +1707,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
                     if not db.game_exists(self.conn, g.chess_com_url):
                         db.save_game(self.conn, g)
                         added += 1
+                    else:                        # reviewed on chess.com since: pick up its accuracy
+                        db.update_accuracy(self.conn, g.chess_com_url, g.my_accuracy, g.opp_accuracy)
                 self._ui_queue.put(lambda: self._on_import_done(added))
             except Exception as e:
                 msg = str(e)

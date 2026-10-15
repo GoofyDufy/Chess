@@ -78,6 +78,9 @@ class Game:
     id: str = field(default_factory=new_id)
     is_analyzed: bool = False
     analyzed_at: Optional[dt.datetime] = None
+    # chess.com's accuracy (%), for games reviewed there (None otherwise)
+    my_accuracy: Optional[float] = None
+    opp_accuracy: Optional[float] = None
 
 
 @dataclass

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import db
+import sac
 import spot
 import threat
 
@@ -65,7 +66,7 @@ def level_for(total_xp: int) -> Level:
 
 
 def total_xp(conn: sqlite3.Connection) -> int:
-    return _attempts_xp(conn) + spot.xp(conn) + threat.xp(conn)    # + Spot the Tactic / threat rounds (own tables)
+    return _attempts_xp(conn) + spot.xp(conn) + threat.xp(conn) + sac.xp(conn)    # + Spot the Tactic / threat rounds (own tables)
 
 
 def _attempts_xp(conn: sqlite3.Connection) -> int:

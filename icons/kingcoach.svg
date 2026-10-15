@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- King Coach: a pawn and the king in its shadow. Pawn: cburnett (Colin M.L. Burnett, GPLv2+) -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#E6A94A"/>
+  <g transform="translate(12 0)" fill="#B5791F">
+    <path d="M37.6 110 L90.4 110 L90.4 103 C 88.5 92, 85 80, 81 70 C 92 64, 95 50, 84 45.5 C 76 42, 68 48, 64 56 C 60 48, 52 42, 44 45.5 C 33 50, 36 64, 47 70 C 43 80, 39.5 92, 37.6 103 Z"/>
+    <rect x="61" y="20" width="6" height="26" rx="1.5"/>
+    <rect x="54.5" y="27" width="19" height="6" rx="1.5"/>
+  </g>
+  <g transform="translate(1.25 37) scale(1.9)"><path fill="#1A1206" stroke="#E6A94A" stroke-width="1.2" d="M22.5 9a4 4 0 0 0-3.22 6.38 6.48 6.48 0 0 0-.87 10.65c-3 1.06-7.41 5.55-7.41 13.47h23c0-7.92-4.41-12.41-7.41-13.47a6.46 6.46 0 0 0-.87-10.65A4.01 4.01 0 0 0 22.5 9z"/></g>
+</svg>

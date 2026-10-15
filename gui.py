@@ -17,11 +17,13 @@ engine_locator.py, or set STOCKFISH_PATH manually)
 
 from __future__ import annotations
 
+import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
 
 import db
+import paths
 import profiles
 import progression
 import theme
@@ -43,6 +45,13 @@ class App(ctk.CTk):
         super().__init__()
         self.title("King Coach")
         theme.apply_theme(self)
+        # the logo — a pawn and the king in its shadow (icons/): window / taskbar icon and the sidebar
+        icons = paths.resource_dir() / "icons"
+        try:
+            self._icons = [tk.PhotoImage(file=str(icons / f"kingcoach-{n}.png")) for n in (64, 48, 34)]
+            self.iconphoto(True, *self._icons[:2])
+        except tk.TclError:
+            self._icons = []
 
         # tall enough for the board card (board + status + buttons) without
         # clipping, but never taller than the screen (minus taskbar/title bar)
@@ -60,9 +69,12 @@ class App(ctk.CTk):
 
         brand = ctk.CTkFrame(sidebar, fg_color="transparent")
         brand.pack(fill="x", padx=18, pady=(24, 22))
-        ctk.CTkLabel(brand, text="♚", width=34, height=34, corner_radius=10,
-                     fg_color=theme.ACCENT, text_color=theme.ACCENT_TEXT,
-                     font=(theme.FONT_FAMILY, 20)).pack(side="left")
+        if self._icons:
+            tk.Label(brand, image=self._icons[2], bg=theme.SIDEBAR_BG, bd=0, highlightthickness=0).pack(side="left")
+        else:                                  # icons/ missing: the king glyph
+            ctk.CTkLabel(brand, text="♚", width=34, height=34, corner_radius=10,
+                         fg_color=theme.ACCENT, text_color=theme.ACCENT_TEXT,
+                         font=(theme.FONT_FAMILY, 20)).pack(side="left")
         theme.label(brand, "King Coach", "heading").pack(side="left", padx=(10, 0))
 
         # ---- player switcher (bottom of the sidebar) ----
@@ -154,7 +166,7 @@ class App(ctk.CTk):
 
         puzzle_tab = PuzzleReviewTab(content, self.conn, on_review_game=review_game)
         review_tab = GameReviewTab(content, self.conn)
-        drill_tab = OpeningDrillTab(content, self.conn)
+        drill_tab = OpeningDrillTab(content, self.conn, on_review_game=review_game)
 
         def drill_opening(opening):
             self.show_page("Opening Drill")

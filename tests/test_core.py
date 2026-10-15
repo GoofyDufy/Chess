@@ -14,11 +14,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import amazing  # noqa: E402
+import sac  # noqa: E402
 import analyzer  # noqa: E402
 import db  # noqa: E402
 import explorer  # noqa: E402
 import lichess_puzzles  # noqa: E402
+import my_lines  # noqa: E402
+import my_openings  # noqa: E402
+import opening_commentary  # noqa: E402
 import opening_importer  # noqa: E402
+import opening_library  # noqa: E402
+import library_character  # noqa: E402
+import practical  # noqa: E402
 import opening_tree  # noqa: E402
 import progression  # noqa: E402
 import puzzle_kind  # noqa: E402
@@ -789,6 +797,218 @@ class ThemesAndWeekTests(unittest.TestCase):
         self.assertEqual((w.games, w.losses, w.analyzed, w.mistake_count, w.facing_threat), (1, 1, 1, 1, 1))
         self.assertEqual(w.mistakes[0].played_san, "e4")
         self.assertIn("threats", [s.action for s in w.suggestions])
+
+
+class MyOpeningsTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        opening_importer.import_pgn_text(QG_PGN, "QG", PlayerColor.WHITE, self.conn)
+
+    def add_game(self, moves, result=GameResult.WIN, url="u"):
+        pgn = f'[Event "x"]\n[WhiteElo "1650"]\n\n{moves} *\n'
+        db.save_game(self.conn, Game(chess_com_url=url, pgn=pgn, played_at=dt.datetime(2026, 9, 1),
+                                     time_control="900+10", my_color=PlayerColor.WHITE,
+                                     opponent_username="opp", result=result))
+
+    def test_your_own_deviations_with_results(self):
+        self.add_game("1. d4 d5 2. Nf3 Nf6", GameResult.LOSS, "a")      # you leave prep (2.c4)
+        self.add_game("1. d4 d5 2. Nf3 e6", GameResult.WIN, "b")
+        self.add_game("1. d4 d5 2. c4 e6 3. Nc3 Nf6", GameResult.WIN, "c")  # followed
+        self.add_game("1. d4 Nf6 2. Nf3", GameResult.DRAW, "d")          # opponent left first: not yours
+        r = my_openings.compute(self.conn)
+        self.assertEqual(len(r.deviations), 1)
+        d = r.deviations[0]
+        self.assertEqual((d.played_san, d.prep_sans, d.games, d.move_number), ("Nf3", ["c4"], 2, 2))
+        self.assertEqual((d.record.wins, d.record.losses), (1, 1))
+        self.assertEqual(d.prep_record.games, 1)                          # 2.c4 played once there
+        self.assertEqual(d.repertoires, ["QG"])
+        o = r.opponent_deviations[0]                                        # 1...Nf6: they left first
+        self.assertEqual((o.played_san, o.prep_sans, o.games, o.usual_reply, o.record.draws),
+                         ("Nf6", ["d5"], 1, "Nf3", 1))
+
+    def test_practical_ranking_and_cache(self):
+        C, R = practical.Choice, practical.Reply
+        choices = [
+            C("g1f3", "Nf3", 30, 0.6, 900, 0.55, 0.10, 35, [R("Nc6", 1.0, 35)], ["your prep"]),
+            C("e2e3", "e3", 20, 0.1, 150, 0.52, 0.60, 55, [R("Nc6", 0.6, 70), R("e6", 0.4, 30)]),
+            C("g2g4", "g4", -120, 0.01, 40, 0.45, 0.90, 80, []),          # popular with nobody, unsound
+        ]
+        ranked = practical.rank(choices)
+        self.assertEqual([c.san for c in ranked], ["e3", "Nf3", "g4"])
+        text = practical.describe(ranked, "rated 1400–2000")
+        self.assertIn("In practice e3 gets you an edge most often", text)
+        self.assertIn("not sound", text)
+        conn = fresh_conn()
+        practical.save(conn, "1400", START, "b1c3", ranked)
+        back = practical.cached(conn, "1400", START, "b1c3")
+        self.assertEqual([(c.san, c.replies[0].san if c.replies else None) for c in back],
+                         [("e3", "Nc6"), ("Nf3", "Nc6"), ("g4", None)])
+        self.assertIsNone(practical.cached(conn, "1400", START, "g1f3"))
+
+    def test_prep_path_says_who_left(self):
+        rep = my_openings.repertoire_for(self.conn, "white")
+        def path(moves):
+            b, out = chess.Board(), []
+            for san in moves.split():
+                out.append(b.push_san(san))
+            return my_openings.prep_path(rep, out, chess.WHITE)
+        p = path("d4 d5 Nf3 Nf6")                                   # your 2.Nf3 (prep: 2.c4)
+        self.assertEqual((p.reason, p.in_prep, p.departure_ply, p.played_san, p.prep_sans), ("you", 2, 2, "Nf3", ["c4"]))
+        p = path("d4 Nf6 c4")                                       # their 1...Nf6
+        self.assertEqual((p.reason, p.in_prep, p.played_san), ("opponent", 1, "Nf6"))
+        self.assertEqual(path("d4 d5 c4 e6 Nc3 Nf6 Bg5").reason, "ended")   # your prep stops after 3...Nf6
+        self.assertEqual(path("e4 e5").reason, "you")               # your prep starts 1.d4
+        empty = my_openings.repertoire_for(self.conn, "black")       # no Black repertoire at all
+        self.assertEqual(my_openings.prep_path(empty, [chess.Move.from_uci("e2e4")], chess.BLACK).reason, "none")
+
+    def test_opening_principles(self):
+        b = chess.Board()
+        b.push_san("d4"); b.push_san("d5")
+        texts = lambda san: " | ".join(f.text for f in opening_commentary.principles(b, b.parse_san(san)))
+        self.assertIn("in front of your c-pawn", texts("Nc3"))
+        self.assertIn("square from your knight on g1", texts("f3"))
+        self.assertIn("diagonal to your king", texts("f3"))
+        self.assertIn("develops the knight", texts("Nf3"))
+        b.push_san("Bf4"); b.push_san("e6")
+        self.assertIn("a second time", texts("Bg3"))
+
+
+LIBRARY_TSV = """eco\tname\tpgn
+B90\tSicilian Defense: Najdorf Variation\t1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6
+B90\tSicilian Defense: Najdorf Variation, English Attack\t1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be3
+D06\tQueen's Gambit\t1. d4 d5 2. c4
+"""
+
+
+class OpeningLibraryTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        opening_library.save(self.conn, opening_library.parse(LIBRARY_TSV))
+
+    def test_search_by_name_eco_and_moves(self):
+        self.assertEqual(opening_library.count(self.conn), 3)
+        self.assertEqual(opening_library.families(self.conn), [("Queen's Gambit", 1), ("Sicilian Defense", 2)])
+        self.assertEqual(len(opening_library.search(self.conn, "najdorf")), 2)
+        self.assertEqual(len(opening_library.search(self.conn, "B9")), 2)
+        self.assertEqual([o.name for o in opening_library.search(self.conn, "d4 d5")], ["Queen's Gambit"])
+        attack = opening_library.search(self.conn, "English Attack")[0]
+        self.assertEqual((attack.variation, attack.last_move, attack.plies), ("Najdorf Variation, English Attack", "6. Be3", 11))
+
+    def test_your_games_per_line(self):
+        def game(gid, moves, result, color=PlayerColor.BLACK):
+            pgn = f'[Event "x"]\n\n{moves} *\n'
+            db.save_game(self.conn, Game(id=gid, chess_com_url=gid, pgn=pgn, played_at=dt.datetime(2026, 9, 1),
+                                         time_control="600", my_color=color, opponent_username="o",
+                                         result=GameResult(result)))
+        game("a", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be3 e5", "win")
+        game("b", "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Bg5", "loss")   # Najdorf (no 6.Be3)
+        game("c", "1. d4 d5 2. c4 e6", "draw", PlayerColor.WHITE)
+        self.assertEqual(len(my_lines.unmatched(self.conn)), 3)
+        rows = [(g, *my_lines.match_game(p, my_lines.library_positions(self.conn)))
+                for g, p in self.conn.execute("SELECT id, pgn FROM games")]
+        my_lines.save(self.conn, rows)
+        self.assertEqual(my_lines.unmatched(self.conn), [])
+        names = {o.id: o.name for o in opening_library.search(self.conn)}
+        recs = {(names[lid], color): r for (lid, color), r in my_lines.records(self.conn).items()}
+        self.assertEqual(recs[("Sicilian Defense: Najdorf Variation, English Attack", "black")].record.wins, 1)
+        self.assertEqual(recs[("Sicilian Defense: Najdorf Variation", "black")].record.losses, 1)
+        self.assertEqual(recs[("Queen's Gambit", "white")].record.draws, 1)
+        self.assertIn("As white: 1 game, 50%", my_lines.describe(recs[("Queen's Gambit", "white")]))
+
+    def test_character_facts_from_the_board(self):
+        def facts(moves, name, later=None):
+            b = chess.Board()
+            for m in moves.split():
+                b.push_san(m)
+            return " | ".join(t for _, t in library_character.board_facts(b, name, 0, later))
+        self.assertIn("a gambit", facts("e4 e5 f4 exf4", "King's Gambit Accepted"))
+        self.assertIn("White is a pawn down for activity", facts("e4 e5 f4 exf4", "King's Gambit Accepted"))
+        self.assertIn("the centre is locked", facts("e4 e6 d4 d5 e5", "French Defense: Advance Variation"))
+        self.assertNotIn("locked", facts("e4 e5 Nf3 Nf6", "Petrov's Defense"))           # e4/e5 alone: open
+        self.assertIn("symmetrical", facts("c4 c5 Nc3 Nc6 g3 g6", "English Opening: Symmetrical Variation"))
+        # a pawn taken and soon won back isn't a gambit
+        self.assertNotIn("down", facts("d4 d5 c4 dxc4", "Queen's Gambit Accepted Declined", later=0))
+
+    def test_repertoire_flag(self):
+        najdorf = opening_library.search(self.conn, "Najdorf Variation, English Attack")[0]
+        self.assertEqual(opening_library.status(najdorf, {})[0], "out")
+        base = opening_library.search(self.conn, "najdorf")
+        plain = next(o for o in base if o.name == "Sicilian Defense: Najdorf Variation")
+        opening_importer.import_pgn_text(opening_library.to_pgn([plain]), "N", PlayerColor.BLACK, self.conn)
+        mine = {c: opening_library.repertoire_moves(self.conn, c) for c in ("white", "black")}
+        self.assertEqual(opening_library.status(plain, mine), ("in", "black", 10))
+        self.assertEqual(opening_library.status(najdorf, mine), ("partly", "black", 10))   # 10 of its 11
+
+    def test_add_to_repertoire_keeps_names_and_marks_covered(self):
+        picked = opening_library.search(self.conn, "najdorf")
+        mine = opening_library.repertoire_moves(self.conn, "black")
+        self.assertFalse(any(opening_library.covered(o, mine) for o in picked))
+        opening_importer.import_pgn_text(opening_library.to_pgn(picked), "Najdorf", PlayerColor.BLACK, self.conn)
+        names = {r[0] for r in self.conn.execute("SELECT DISTINCT line_name FROM opening_lines")}
+        self.assertEqual(names, {o.name for o in picked})
+        mine = opening_library.repertoire_moves(self.conn, "black")
+        self.assertTrue(all(opening_library.covered(o, mine) for o in picked))
+
+
+class AmazingMoveTests(unittest.TestCase):
+    def test_a_piece_offered_soundly_is_amazing(self):
+        # Greek gift: Bxh7+ takes a pawn and gives the bishop (the king can take it): 3 - 1
+        fen = "r1bq1rk1/pppn1ppp/4p3/3pP3/1b1P4/2NB1N2/PPP2PPP/R2QK2R w KQ - 0 8"
+        self.assertEqual(amazing.offered(chess.Board(fen), chess.Move.from_uci("d3h7")), 2)
+        self.assertEqual(amazing.is_amazing(fen, "d3h7", 120, 110), 2)
+        self.assertEqual(amazing.is_amazing(fen, "d3h7", 120, -200), 0)      # it doesn't work: not amazing
+        self.assertEqual(amazing.is_amazing(fen, "d3h7", 700, 690), 0)       # already winning big
+        self.assertEqual(amazing.is_amazing(fen, "a2a3", 120, 110), 0)       # nothing offered
+
+    def test_a_missed_sacrifice_becomes_a_puzzle(self):
+        fen = "r1bq1rk1/pppn1ppp/4p3/3pP3/1b1P4/2NB1N2/PPP2PPP/R2QK2R w KQ - 0 8"
+        # best was Bxh7+ (a sacrifice, +1.2); you castled instead (+0.2): missed, though under the blunder size
+        self.assertEqual(amazing.missed_sacrifice(fen, "e1g1", "d3h7", 120, 20), 2)
+        self.assertEqual(amazing.missed_sacrifice(fen, "e1g1", "d3h7", 120, 110), 0)   # about as good
+        self.assertEqual(amazing.missed_sacrifice(fen, "e1g1", "d3h7", 700, 300), 0)   # already winning
+        ev = MoveEvaluation(game_id="g1", ply=14, fen_before=fen, move_uci="e1g1", best_move_uci="d3h7",
+                            cp_before=120, cp_after=20, depth=14)
+        p = analyzer.puzzles_from_evaluations([ev], 150)
+        self.assertEqual([(x.puzzle_type, x.correct_move_san) for x in p], [("Missed Sacrifice", "Bxh7+")])
+
+    def test_a_trade_is_no_sacrifice(self):
+        # Bxf6: takes a knight, gets taken back — even
+        fen = "rnbqkb1r/pppp1ppp/5n2/4p1B1/4P3/8/PPPP1PPP/RN1QKBNR w KQkq - 2 3"
+        self.assertEqual(amazing.offered(chess.Board(fen), chess.Move.from_uci("g5f6")), 0)
+
+    def test_accuracy(self):
+        self.assertAlmostEqual(amazing.move_accuracy(30, 30), 100, delta=0.5)
+        self.assertLess(amazing.move_accuracy(30, -400), 30)
+        good = {0: {"cp_before": 30, "cp_after": 30}, 2: {"cp_before": 20, "cp_after": 15}}
+        one_blunder = {**good, 4: {"cp_before": 20, "cp_after": -600}}
+        self.assertGreater(amazing.game_accuracy(good), 95)
+        self.assertLess(amazing.game_accuracy(one_blunder), 60)      # the harmonic half punishes it
+
+
+class MakeItWorkTests(unittest.TestCase):
+    def test_only_sacrifices_that_work_and_scoring(self):
+        a = lambda cp_after, gid: amazing.Amazing(gid, 20, "Bxh7+", 2, 100, cp_after, START, "e2e4")
+        cands = sac.own_candidates([a(50, "g1"), a(-200, "g2")])
+        self.assertEqual([c.game_id for c in cands], ["g1"])           # you're worse after g2's: left out
+        conn = fresh_conn()
+        sac.record(conn, cands[0], moves=3, misses=0)
+        sac.record(conn, cands[0], moves=3, misses=2)
+        self.assertEqual(sac.summary(conn), (2, 1))
+        self.assertEqual(sac.xp(conn), sac.CLEAN_XP + sac.DONE_XP)
+        self.assertEqual(progression.total_xp(conn), sac.xp(conn))
+        self.assertIn(cands[0].key, sac.seen(conn))
+
+    def test_judging_your_follow_up(self):
+        board = chess.Board()
+        step = sac.Step(False, best=chess.Move.from_uci("e2e4"), best_cp=80)
+        self.assertEqual(sac.judge(None, board, chess.Move.from_uci("e2e4"), step), (True, 80))
+        key = lambda b: b.fen().split()[0]
+        after = board.copy(); after.push_uci("d2d4")
+        close = FakeEngine({key(after): [(["d7d5"], -70)]})         # their view: you're +0.7
+        self.assertTrue(sac.judge(close, board, chess.Move.from_uci("d2d4"), step)[0])
+        after = board.copy(); after.push_uci("a2a3")
+        poor = FakeEngine({key(after): [(["e7e5"], 150)]})          # you're −1.5: lets them off the hook
+        self.assertFalse(sac.judge(poor, board, chess.Move.from_uci("a2a3"), step)[0])
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ ANALYZE_MODE = "Analyze myself"
 
 class PlayWindow(ctk.CTkToplevel):
     def __init__(self, master, fen: str, title: str = "Play it out",
-                 my_color: Optional[chess.Color] = None, conn=None):
+                 my_color: Optional[chess.Color] = None, conn=None, analyze: bool = False):
         super().__init__(master)
         self.title(title)
         self.configure(fg_color=theme.BG)
@@ -58,6 +58,9 @@ class PlayWindow(ctk.CTkToplevel):
         self._engine_ok = False
 
         self._build(title)
+        if analyze:                       # straight into Analyze myself (both sides, engine eval)
+            self.mode_switch.set(ANALYZE_MODE)
+            self._on_mode_changed()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         path = engine_locator.find_stockfish()

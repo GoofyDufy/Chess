@@ -42,8 +42,12 @@ def get_games_from_archive(archive_url: str, username: str) -> List[Game]:
         else:
             result = GameResult.DRAW
 
+        acc = g.get("accuracies") or {}          # only for games reviewed on chess.com
+        mine, theirs = ("white", "black") if my_color == PlayerColor.WHITE else ("black", "white")
         games.append(
             Game(
+                my_accuracy=acc.get(mine),
+                opp_accuracy=acc.get(theirs),
                 chess_com_url=g["url"],
                 pgn=g["pgn"],
                 played_at=dt.datetime.fromtimestamp(g.get("end_time", 0)),

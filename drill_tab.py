@@ -32,15 +32,22 @@ IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2n
 from drill import DrillResult, OpeningDrillSession, format_move_list
 from models import PlayerColor
 from tree_view import LIKELY_TEXT, TreeView, move_label as tree_view_label, short_name
+from my_games_view import MyGamesView
+from library_window import LibraryWindow
+import my_openings
 
 ADD_LINES = "Add lines"
 TREE = "Tree"
+MY_GAMES = "My games"
+TOP_STARS = 3                 # moves named under the tree per star (the rest: "+N more")
+MINE_COLOR = "#D9534F"        # your move where it leaves your prep (red arrow); prep = green
 
 
 class OpeningDrillTab(ctk.CTkFrame):
-    def __init__(self, master, conn):
+    def __init__(self, master, conn, on_review_game=None):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
+        self.on_review_game = on_review_game        # (game_id, fen): Game Review at that position
         self.session: Optional[OpeningDrillSession] = None
 
         self._build_layout()
@@ -120,7 +127,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         # Setup (pick a line) vs Plans (what the opening is about) vs Add lines
         # (import/edit) — separate views so the column fits short screens
         self.right_switch = ctk.CTkSegmentedButton(
-            right, values=["Setup", "Plans", TREE, ADD_LINES], command=self._show_right_view,
+            right, values=["Setup", "Plans", TREE, MY_GAMES, ADD_LINES], command=self._show_right_view,
             height=34, font=theme.FONT_BOLD, fg_color=theme.PANEL_BG,
             selected_color=theme.CONTROL_BG, selected_hover_color=theme.CONTROL_BG,
             unselected_color=theme.PANEL_BG, unselected_hover_color=theme.PANEL_ALT,
@@ -131,7 +138,10 @@ class OpeningDrillTab(ctk.CTkFrame):
         plans = theme.card(right)
         add_lines = ctk.CTkFrame(right, fg_color="transparent")
         tree = ctk.CTkFrame(right, fg_color="transparent")
-        self._right_views = {"Setup": setup, "Plans": plans, TREE: tree, ADD_LINES: add_lines}
+        self.my_games = MyGamesView(right, self.conn, self._show_my_deviation, self._my_deviation_on_tree,
+                                    review_game=self.on_review_game)
+        self._right_views = {"Setup": setup, "Plans": plans, TREE: tree, MY_GAMES: self.my_games,
+                             ADD_LINES: add_lines}
         self._build_tree_view(tree)
         self.plans_body = ctk.CTkScrollableFrame(plans, fg_color="transparent")
         self.plans_body.pack(fill="both", expand=True, padx=8, pady=8)
@@ -183,6 +193,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         manage = ctk.CTkFrame(manage_card, fg_color="transparent")
         manage.pack(fill="x", padx=18, pady=16)
         theme.label(manage, "Add or edit lines", "heading").pack(anchor="w", pady=(0, 8))
+        # every named opening (Lichess's dataset): browse, preview, add to a repertoire
+        theme.button(manage, "Opening library — all named openings...", self._open_library,
+                     "primary").pack(fill="x", pady=3)
         for text, command in (("Import PGN file...", self._import_repertoire),
                               ("Paste / type a line...", self._open_paste_dialog),
                               ("Turn lines on/off...", self._open_manage_lines_dialog)):
@@ -210,7 +223,10 @@ class OpeningDrillTab(ctk.CTkFrame):
                 view.pack(fill="both", expand=True)
             else:
                 view.pack_forget()
+        if name == MY_GAMES:
+            self.my_games.refresh()
         if name == TREE:
+            self.my_games.all_deviations()          # your deviations, for the tree's red badges
             # show the tree of what you're drilling (or picked in Setup)
             wanted = self._scope_to_match()
             if wanted is not None and wanted != self.tree_scope_var.get():
@@ -258,6 +274,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.tree_view = TreeView(parent, self._on_tree_select, on_wheel=self._tree_step, height=200)
         self.tree_view.on_deviation = self._on_deviation
         self.tree_view.on_context = self._on_tree_context
+        self.tree_view.on_my_deviation = self._on_star
         self._starts: list = []                # (repertoire, node where its opening starts)
         self._deviations: dict = {}            # id(node) -> [opening_tree.Deviation] from Lichess
         self.tree_view.pack(fill="both", expand=True)
@@ -442,10 +459,145 @@ class OpeningDrillTab(ctk.CTkFrame):
             self._deviations = opening_tree.deviations(
                 self._tree, lambda fen: explorer.cached(self.conn, fen, bands), PlayerColor(scope[1]))
         self.tree_view.set_deviations(self._deviations)
+        self._update_my_deviations()
         if self._tree_node is not None:
             self._show_node_deviations(self._tree_node)
 
+    # ---------- your own deviations (Opening Drill → My games) ----------
+
+    def _update_my_deviations(self) -> None:
+        """Stars on the tree from your games: red where you left your prep, blue where your opponent did."""
+        scope = self._tree_scope()
+        mine_found, opp_found = {}, {}
+        if self._tree is not None and scope is not None and self.my_games._report is not None:
+            mine = chess.WHITE if scope[1] == PlayerColor.WHITE.value else chess.BLACK
+            key = lambda fen: " ".join(fen.split()[:4])
+            yours, theirs = {}, {}
+            for d in self.my_games.all_deviations():
+                if d.color == scope[1]:
+                    yours.setdefault(key(d.fen), []).append(d)
+            for o in self.my_games.all_opponent_deviations():
+                if o.color == scope[1]:
+                    theirs.setdefault(key(o.fen), []).append(o)
+            stack = [self._tree.root]
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children)
+                board = node.board()
+                found = (yours if board.turn == mine else theirs).get(key(board.fen()))
+                if found:
+                    (mine_found if board.turn == mine else opp_found)[id(node)] = found
+        self._my_devs, self._opp_devs = mine_found, opp_found
+        self.tree_view.set_my_deviations(mine_found, opp_found)
+
+    def _my_dev_text(self, node: opening_tree.Node) -> str:
+        lines = []
+        devs = getattr(self, "_my_devs", {}).get(id(node), [])
+        if devs:
+            devs = sorted(devs, key=lambda d: -d.games)
+            parts = [f"{d.played_san} {d.games}×" for d in devs[:TOP_STARS]]
+            more = f" +{len(devs) - TOP_STARS} more" if len(devs) > TOP_STARS else ""
+            lines.append(f"★ You left your prep (red): " + " · ".join(parts) + more + " — click the star for why.")
+        opps = getattr(self, "_opp_devs", {}).get(id(node), [])
+        if opps:
+            opps = sorted(opps, key=lambda o: -o.games)
+            parts = [f"{o.played_san} {o.games}× ({o.record.score:.0%})" for o in opps[:TOP_STARS]]
+            more = f" +{len(opps) - TOP_STARS} more" if len(opps) > TOP_STARS else ""
+            lines.append("★ Opponents left your prep (blue): " + " · ".join(parts) + more
+                         + " — click the star to answer the top one.")
+        return "\n".join(lines)
+
+    def _on_star(self, dev) -> None:
+        """A star clicked: yours opens its why (My games); an opponent's starts a
+        temporary branch with their move, to build your answer."""
+        if not isinstance(dev, my_openings.OpponentDeviation):
+            self._open_my_deviation(dev)
+            return
+        key = " ".join(dev.fen.split()[:4])
+        target = None
+        stack = [self._tree.root] if self._tree else []
+        while stack and target is None:
+            n = stack.pop()
+            if " ".join(n.board().fen().split()[:4]) == key:
+                target = n
+            stack.extend(n.children)
+        if target is None:
+            return
+        self._on_tree_select(target)
+        if self._tree_node is not target:          # you kept an unsaved branch
+            return
+        self._draft = [chess.Move.from_uci(dev.played_uci)]
+        self._show_draft()
+        usual = f" You usually answered {dev.usual_reply}." if dev.usual_reply else ""
+        self.status_label.configure(
+            text=f"Your opponents played {dev.played_san} here {dev.games}× (your prep expects "
+                 f"{'/'.join(dev.prep_sans)}); you scored {dev.record.score:.0%}.{usual} "
+                 "Play your answer, then Save branch.", text_color=theme.TEXT_MUTED)
+
+    def _open_my_deviation(self, d) -> None:
+        self.right_switch.set(MY_GAMES)
+        self._show_right_view(MY_GAMES)
+        self.my_games.open(d)
+
+    def _show_my_deviation(self, board: chess.Board, mine: chess.Move, prep: List[chess.Move],
+                           title: str, status: str, extra: Optional[List[chess.Move]] = None) -> None:
+        """A deviation picked in My games: the position on the board, prep green, yours red."""
+        if self.session is not None and not self.session.is_finished():
+            self.session = None
+            self._layout_buttons()
+        self._clear_ideas()
+        self.board_widget.show_board(board.copy(), flipped=board.turn == chess.BLACK)
+        self.board_widget.set_marked_arrows(
+            [(m.from_square, m.to_square, REPLY_COLOR) for m in prep] + [(mine.from_square, mine.to_square, MINE_COLOR)]
+            + [(m.from_square, m.to_square, theme.ACCENT) for m in extra or []])     # works best at your level
+        self.line_name_label.configure(text=title)
+        self.status_label.configure(text=status, text_color=theme.TEXT)
+        self.move_note_label.configure(text="")
+        self.recap_label.configure(text="")
+
+    def _my_deviation_on_tree(self, d) -> None:
+        """Open the Tree on all of that colour's openings, at the deviation's position."""
+        self.right_switch.set(TREE)
+        self._show_right_view(TREE)
+        wanted = self.ALL_SCOPE[d.color]
+        if self.tree_scope_var.get() != wanted:
+            self.tree_scope_var.set(wanted)
+            self._on_tree_scope()
+        if self._tree is None:
+            return
+        key = " ".join(d.fen.split()[:4])
+        stack, node = [self._tree.root], None
+        while stack and node is None:
+            n = stack.pop()
+            if " ".join(n.board().fen().split()[:4]) == key:
+                node = n
+            stack.extend(n.children)
+        if node is None:
+            self.status_label.configure(text="That position isn't on this tree (your prep reaches it by another "
+                                             "move order) — open it from Setup or Analyze instead.",
+                                        text_color=theme.TEXT_MUTED)
+            return
+        self._on_tree_select(node)
+        if self._tree_node is not node:          # you kept an unsaved branch
+            return
+        # your game move as a temporary branch: play on from it, ◀ back, Save branch or Discard
+        self._draft = [chess.Move.from_uci(d.played_uci)]
+        self._show_draft()
+        best = self.my_games.practical_best(d)
+        tip = (f" Works best at your level: {best} — ◀ and play it to compare." if best else "")
+        self.status_label.configure(
+            text=f"Your game move {d.played_san} as a temporary branch (your prep: {'/'.join(d.prep_sans)}). "
+                 f"Play on for both sides, ◀ to step back, Save branch to keep it, Discard to drop it.{tip}",
+            text_color=theme.TEXT_MUTED)
+
     def _show_node_deviations(self, node: opening_tree.Node) -> None:
+        self._show_lichess_deviations(node)
+        mine = self._my_dev_text(node)
+        if mine:
+            current = self.tree_dev_label.cget("text")
+            self.tree_dev_label.configure(text=f"{mine}\n{current}" if current else mine)
+
+    def _show_lichess_deviations(self, node: opening_tree.Node) -> None:
         if not explorer.get_token(self.conn):
             self.tree_dev_label.configure(
                 text=f"Connect Lichess ({ADD_LINES} → Connect Lichess...) to see where players leave these lines.")
@@ -766,6 +918,24 @@ class OpeningDrillTab(ctk.CTkFrame):
                                          "◀ takes a move back.", text_color=theme.TEXT_MUTED)
         self.move_note_label.configure(text="")
         self._layout_tree_buttons()
+        self._draft_replies(board)
+
+    def _draft_replies(self, board: chess.Board) -> None:
+        """At the end of a new branch: what players at your level play here
+        (cached explorer data only), so you can build the branch from real moves."""
+        stats = explorer.cached(self.conn, board.fen()) if explorer.get_token(self.conn) else None
+        if stats is None or not stats.games:
+            self.tree_dev_label.configure(text="")
+            return
+        usual = sorted(stats.moves, key=lambda m: -m.games)[:5]
+        band = explorer.describe_bands(explorer.rating_bands(self.conn))
+        scope = self._tree_scope()
+        my_turn = scope is not None and (board.turn == chess.WHITE) == (scope[1] == PlayerColor.WHITE.value)
+        verb = "usually play" if my_turn else "usually reply"
+        self.tree_dev_label.configure(
+            text=f"Players {band} {verb} here: "
+                 + " · ".join(f"{board.san(chess.Move.from_uci(m.uci))} {m.games / stats.games:.0%}" for m in usual)
+                 + " — play one on the board to grow the branch.")
 
     def _clear_draft(self) -> None:
         self._draft = []
@@ -1051,6 +1221,14 @@ class OpeningDrillTab(ctk.CTkFrame):
         dialog.transient(parent.winfo_toplevel())
         dialog.after(50, dialog.lift)   # CTkToplevel can open behind its parent on Windows
         return dialog
+
+    def _open_library(self) -> None:
+        win = getattr(self, "_library", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        self._library = LibraryWindow(self, self.conn, self._ask_repertoire_name_and_color,
+                                      on_added=self._refresh_repertoire_list, review_game=self.on_review_game)
 
     def _ask_repertoire_name_and_color(self, parent=None):
         """One small modal dialog for both questions — a name field plus

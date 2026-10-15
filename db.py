@@ -168,6 +168,16 @@ def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:
     puzzle_tags.ensure_schema(conn)
     import threat                          # What's the threat? rounds
     threat.ensure_schema(conn)
+    import opening_commentary              # why your opening deviations are worse (cached)
+    opening_commentary.ensure_schema(conn)
+    import practical                       # what works at your level, per position (cached)
+    practical.ensure_schema(conn)
+    import opening_library                 # every named opening (Lichess's dataset)
+    opening_library.ensure_schema(conn)
+    import my_lines                        # your games, matched to the library's named lines
+    my_lines.ensure_schema(conn)
+    import sac                             # Sacrifice!! rounds (Tactics & Threats)
+    sac.ensure_schema(conn)
     _migrate(conn)
     return conn
 
@@ -200,6 +210,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE puzzles ADD COLUMN eval_before_cp INTEGER")
     if "eval_after_cp" not in existing_cols:
         conn.execute("ALTER TABLE puzzles ADD COLUMN eval_after_cp INTEGER")
+    game_cols = {row["name"] for row in conn.execute("PRAGMA table_info(games)")}
+    for col in ("my_accuracy", "opp_accuracy"):          # chess.com's accuracy, when reviewed there
+        if col not in game_cols:
+            conn.execute(f"ALTER TABLE games ADD COLUMN {col} REAL")
     if "puzzle_type" not in existing_cols:
         conn.execute("ALTER TABLE puzzles ADD COLUMN puzzle_type TEXT")
     # what kind of puzzle (puzzle_kind.py): its solution, how many of your moves, attacking/defensive/positional
@@ -242,16 +256,27 @@ def save_game(conn: sqlite3.Connection, game: Game) -> None:
     conn.execute(
         """INSERT OR REPLACE INTO games
            (id, chess_com_url, pgn, played_at, time_control, my_color,
-            opponent_username, result, is_analyzed, analyzed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            opponent_username, result, is_analyzed, analyzed_at, my_accuracy, opp_accuracy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             game.id, game.chess_com_url, game.pgn,
             game.played_at.isoformat(), game.time_control,
             game.my_color.value, game.opponent_username, game.result.value,
             int(game.is_analyzed),
             game.analyzed_at.isoformat() if game.analyzed_at else None,
+            game.my_accuracy, game.opp_accuracy,
         ),
     )
+    conn.commit()
+
+
+def update_accuracy(conn: sqlite3.Connection, chess_com_url: str, mine: Optional[float],
+                    theirs: Optional[float]) -> None:
+    """chess.com's accuracy for a game you already have (it may be reviewed after you imported it)."""
+    if mine is None and theirs is None:
+        return
+    conn.execute("UPDATE games SET my_accuracy = ?, opp_accuracy = ? WHERE chess_com_url = ?",
+                 (mine, theirs, chess_com_url))
     conn.commit()
 
 
@@ -310,6 +335,8 @@ def _row_to_game(r: sqlite3.Row) -> Game:
         result=GameResult(r["result"]),
         is_analyzed=bool(r["is_analyzed"]),
         analyzed_at=dt.datetime.fromisoformat(r["analyzed_at"]) if r["analyzed_at"] else None,
+        my_accuracy=r["my_accuracy"] if "my_accuracy" in r.keys() else None,
+        opp_accuracy=r["opp_accuracy"] if "opp_accuracy" in r.keys() else None,
     )
 
 

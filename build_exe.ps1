@@ -8,7 +8,7 @@ Set-Location $PSScriptRoot
 
 python -m pip install --quiet pyinstaller
 
-$addData = @("--add-data", "fonts;fonts", "--add-data", "pieces;pieces")
+$addData = @("--add-data", "fonts;fonts", "--add-data", "pieces;pieces", "--add-data", "icons;icons")
 if (Test-Path stockfish) {
     # bundle the engine so Puzzle Review / Play it out work out of the box
     $addData += @("--add-data", "stockfish;stockfish")
@@ -16,7 +16,7 @@ if (Test-Path stockfish) {
     Write-Warning "No stockfish\ folder found - the app will ask users to add Stockfish themselves."
 }
 
-python -m PyInstaller --noconfirm --clean --windowed --name KingCoach `
+python -m PyInstaller --noconfirm --clean --windowed --name KingCoach --icon icons\kingcoach.ico `
     --collect-data customtkinter @addData gui.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 

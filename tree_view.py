@@ -29,6 +29,9 @@ GLOW = theme.ACCENT
 NAME_CHARS = 20          # leaf names longer than this are shortened (the full name shows below the tree)
 SNAP_PX = 24             # the mouse picks the nearest move within this distance
 DRAFT_STEP = (15, -17)   # each move of a new (unsaved) branch: right and up from the last
+# from your own games (stars — circles are Lichess data): where you / your opponents left your prep
+MY_DEVIATION = "#D9534F"   # red star: you
+OPP_DEVIATION = "#3B82F6"  # blue star: your opponent
 WILD = "#6B7280"         # Lichess deviations: replies your lines don't cover
 WILD_BEFORE = "#3F4450"  # ...before the opening starts (other openings): fainter
 # how often Lichess players at your level choose a sideline: grey / amber / red
@@ -79,6 +82,13 @@ class TreeView(ctk.CTkFrame):
         self.on_deviation: Optional[Callable[[Node, str], None]] = None   # (position, uci)
         self.deviations: Dict[int, list] = {}      # id(node) -> [opening_tree.Deviation]
         self._dev_items: Dict[int, Tuple[Node, str]] = {}
+        # from your games, as numbered stars: where YOU left your prep (red,
+        # id(node) -> [my_openings.MyDeviation]) and where your OPPONENT did (blue,
+        # [my_openings.OpponentDeviation]); clicking one calls on_my_deviation(deviation)
+        self.my_deviations: Dict[int, list] = {}
+        self.opp_deviations: Dict[int, list] = {}
+        self.on_my_deviation: Optional[Callable] = None
+        self._my_items: Dict[int, object] = {}
         self.starts: List[Tuple[str, Node]] = []   # (repertoire, where its opening starts)
         self._board_items: Dict[int, Node] = {}     # mini-board square -> its first move (or the root)
         self.show_before = True                     # draw replies before the start (other openings)
@@ -100,10 +110,22 @@ class TreeView(ctk.CTkFrame):
         self._hovered: Optional[Node] = None
         self.draft_anchor: Optional[Node] = None   # a new branch being played, from this position
         self.draft_sans: List[str] = []
+        # free zoom, any time (Ctrl+wheel / + − buttons, drag to move): a view on top
+        # of the layout — moves spread out, text and stars keep their size
+        self.view_zoom = 1.0
+        self.view_center: Optional[Tuple[float, float]] = None   # layout point at the canvas centre
+        self._press: Optional[Tuple[int, int]] = None
+        self._dragged = False
+        self._build_zoom_buttons()
         self.canvas.bind("<Configure>", self._on_resize)
         self.canvas.bind("<Motion>", self._on_motion)
         self.canvas.bind("<Leave>", lambda e: self._set_hover(None))
-        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Control-MouseWheel>", lambda e: self.zoom_at(e.x, e.y, 1.25 if e.delta > 0 else 0.8))
+        self.canvas.bind("<Control-Button-4>", lambda e: self.zoom_at(e.x, e.y, 1.25))
+        self.canvas.bind("<Control-Button-5>", lambda e: self.zoom_at(e.x, e.y, 0.8))
         self.canvas.bind("<Button-3>", self._on_right_click)
         self.canvas.bind("<MouseWheel>", lambda e: self._wheel(-1 if e.delta > 0 else 1))
         self.canvas.bind("<Button-4>", lambda e: self._wheel(-1))
@@ -116,6 +138,7 @@ class TreeView(ctk.CTkFrame):
 
     def set_tree(self, tree: Optional[Tree], repertoire: str) -> None:
         self.tree, self.repertoire = tree, repertoire
+        self.view_zoom, self.view_center = 1.0, None
         self.selected = tree.root if tree else None
         self.focus_path = tree.leaves[0][1] if tree and tree.leaves else []
         self._relayout()
@@ -135,6 +158,11 @@ class TreeView(ctk.CTkFrame):
 
     def set_deviations(self, deviations: Dict[int, list]) -> None:
         self.deviations = deviations
+        self._paint()
+
+    def set_my_deviations(self, deviations: Dict[int, list], opponents: Optional[Dict[int, list]] = None) -> None:
+        self.my_deviations = deviations
+        self.opp_deviations = opponents or {}
         self._paint()
 
     def set_draft(self, anchor: Optional[Node], sans: List[str]) -> None:
@@ -185,12 +213,100 @@ class TreeView(ctk.CTkFrame):
         focus = self.tree.first_move_of(self.selected) if self.selected is not None else None
         opening_tree.layout(self.tree, w, h, focus=focus, zoom=self._zoom_branch())
         self._node_branch = {id(n): (b, i) for b in self.tree.branches for i, n in enumerate(b.nodes)}
-        if self.tree.width > w + 1:
+        zoomed = self.view_zoom > 1.0
+        if self.tree.width > w + 1 and not zoomed:
             self.scroll.pack(fill="x", padx=6, pady=(0, 4))
         else:
             self.scroll.pack_forget()
-        self.canvas.configure(scrollregion=(0, 0, self.tree.width, h))
+        if zoomed:
+            self._apply_view(w, h)
+            self.canvas.configure(scrollregion=(0, 0, w, h))
+            self.canvas.xview_moveto(0)
+        else:
+            self.canvas.configure(scrollregion=(0, 0, self.tree.width, h))
+        self.zoom_label.configure(text=f"{self.view_zoom:.1f}×" if zoomed else "")
         self._paint()
+
+    # ---------- free zoom ----------
+
+    MAX_VIEW_ZOOM = 6.0
+
+    def _build_zoom_buttons(self) -> None:
+        bar = ctk.CTkFrame(self, fg_color=theme.PANEL_ALT, corner_radius=8)
+        style = dict(width=26, height=24, font=theme.FONT_BOLD, corner_radius=6)
+        theme.button(bar, "+", lambda: self.zoom_at(None, None, 1.4), **style).pack(side="left", padx=(3, 0), pady=3)
+        theme.button(bar, "−", lambda: self.zoom_at(None, None, 1 / 1.4), **style).pack(side="left", padx=(3, 0), pady=3)
+        theme.button(bar, "⟲", self.reset_view, **style).pack(side="left", padx=3, pady=3)
+        self.zoom_label = theme.label(bar, "", "muted", width=30)
+        self.zoom_label.pack(side="left", padx=(0, 4))
+        bar.place(relx=1.0, x=-10, y=10, anchor="ne")
+
+    def _apply_view(self, w: float, h: float) -> None:
+        """Layout coordinates -> the zoomed view, in place (so clicks and hovering just work)."""
+        z = self.view_zoom
+        cx, cy = self.view_center or (w / 2, h / 2)
+        tx = lambda x: (x - cx) * z + w / 2
+        ty = lambda y: (y - cy) * z + h / 2
+        stack = [self.tree.root]
+        while stack:
+            n = stack.pop()
+            n.x, n.y = tx(n.x), ty(n.y)
+            stack.extend(n.children)
+        # zoomed in, the mini board would fill the view: it's hidden (⟲ brings it back)
+        self.tree.board = None
+
+    def _layout_point(self, sx: float, sy: float) -> Tuple[float, float]:
+        """A point on screen -> the same point in layout coordinates (before the view)."""
+        w, h = max(self.canvas.winfo_width(), 200), max(self.canvas.winfo_height(), 200)
+        if self.view_zoom <= 1.0:
+            return self.canvas.canvasx(sx), self.canvas.canvasy(sy)
+        cx, cy = self.view_center or (w / 2, h / 2)
+        return (sx - w / 2) / self.view_zoom + cx, (sy - h / 2) / self.view_zoom + cy
+
+    def zoom_at(self, sx: Optional[float], sy: Optional[float], factor: float) -> None:
+        """Zoom by factor, keeping the point under the pointer (or the centre) where it is."""
+        if self.tree is None:
+            return
+        w, h = max(self.canvas.winfo_width(), 200), max(self.canvas.winfo_height(), 200)
+        if sx is None:
+            sx, sy = w / 2, h / 2
+        lx, ly = self._layout_point(sx, sy)
+        z = max(1.0, min(self.MAX_VIEW_ZOOM, self.view_zoom * factor))
+        if z <= 1.0001:
+            self.reset_view()
+            return
+        self.view_zoom = z
+        self.view_center = (lx - (sx - w / 2) / z, ly - (sy - h / 2) / z)
+        self._relayout()
+
+    def reset_view(self) -> None:
+        self.view_zoom, self.view_center = 1.0, None
+        self._relayout()
+
+    def _on_press(self, event) -> None:
+        self._press, self._dragged = (event.x, event.y), False
+
+    def _on_drag(self, event) -> None:
+        if self._press is None or self.view_zoom <= 1.0:
+            return
+        dx, dy = event.x - self._press[0], event.y - self._press[1]
+        if not self._dragged and dx * dx + dy * dy < 16:
+            return                              # a click, not a drag (yet)
+        self._dragged = True
+        self._press = (event.x, event.y)
+        w, h = max(self.canvas.winfo_width(), 200), max(self.canvas.winfo_height(), 200)
+        cx, cy = self.view_center or (w / 2, h / 2)
+        self.view_center = (cx - dx / self.view_zoom, cy - dy / self.view_zoom)
+        self.canvas.configure(cursor="fleur")
+        self._relayout()
+
+    def _on_release(self, event) -> None:
+        dragged, self._press = self._dragged, None
+        self._dragged = False
+        if dragged:
+            self.canvas.configure(cursor="")
+            return
+        self._on_click(event)
 
     def _on_path(self) -> set:
         """ids of the positions from the root to the selection."""
@@ -259,6 +375,7 @@ class TreeView(ctk.CTkFrame):
         self._label_branches()
         self._paint_start_flag()
         self._paint_deviations()
+        self._paint_my_deviations()
         if self.draft_anchor is not None:
             self._paint_draft()
         else:
@@ -423,6 +540,9 @@ class TreeView(ctk.CTkFrame):
 
     def _on_click(self, event) -> None:
         over = self.canvas.find_withtag("current")
+        if over and over[0] in self._my_items and self.on_my_deviation is not None:
+            self.on_my_deviation(self._my_items[over[0]])
+            return
         if over and over[0] in self._dev_items and self.on_deviation is not None:
             self.on_deviation(*self._dev_items[over[0]])
             return
@@ -436,6 +556,43 @@ class TreeView(ctk.CTkFrame):
     def _wheel(self, delta: int) -> None:
         if self.on_wheel is not None:
             self.on_wheel(delta)
+
+    # ---------- your own deviations: a red badge where you left your prep ----------
+
+    @staticmethod
+    def _star_points(x: float, y: float, outer: float, inner: float) -> List[float]:
+        pts = []
+        for i in range(10):
+            r = outer if i % 2 == 0 else inner
+            a = math.radians(-90 + 36 * i)
+            pts += [x + r * math.cos(a), y + r * math.sin(a)]
+        return pts
+
+    def _paint_my_deviations(self) -> None:
+        """Numbered stars from your games: red = you left your prep here, blue = your opponent did."""
+        c = self.canvas
+        self._my_items = {}
+        if self.tree is None or self.overview:
+            return
+        font = (theme.FONT_FAMILY, 7, "bold")
+        for node in self._nodes():
+            # yours up-right, theirs up-left: nearby positions' stars don't hide each other
+            for devs, color, dx in ((self.my_deviations.get(id(node)), MY_DEVIATION, 10),
+                                    (self.opp_deviations.get(id(node)), OPP_DEVIATION, -10)):
+                if not devs:
+                    continue
+                games = sum(d.games for d in devs)
+                x, y = node.x + dx, node.y - 10
+                outer = 10 if games < 100 else 12
+                star = c.create_polygon(*self._star_points(x, y, outer, outer * 0.5), fill=color,
+                                        outline=theme.PANEL_BG, width=1.2)
+                label = c.create_text(x, y + 1, text=str(games) if games < 1000 else "1k", fill="#FFFFFF", font=font)
+                top = max(devs, key=lambda d: d.games)
+                for item in (star, label):
+                    self._my_items[item] = top
+                    c.tag_bind(item, "<Enter>", lambda e: c.configure(cursor="hand2"))
+        for item in self._my_items:          # stars above the twigs and rings
+            c.tag_raise(item)
 
     # ---------- Lichess deviations: short grey "wild" twigs ----------
 
@@ -647,6 +804,8 @@ class TreeView(ctk.CTkFrame):
                       fill=GLOW, font=(theme.FONT_FAMILY, 10, "bold"))
 
     def _scroll_into_view(self, node: Optional[Node]) -> None:
+        if self.view_zoom > 1.0:
+            return                              # zoomed: you move the view yourself
         if node is None or self.tree is None or self.tree.width <= self.canvas.winfo_width() + 1:
             return
         left, right = (f * self.tree.width for f in self.canvas.xview())
