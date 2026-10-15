@@ -44,16 +44,23 @@ keeps score with XP and levels.
    analyzed twice. **Focus** (e.g. *All except Bullet*) limits which games.
 3. Your mistakes become puzzles. **Blunder size** sets how big a mistake has
    to be; **Apply blunder size** rebuilds the puzzles instantly from the
-   saved analysis.
+   saved analysis. A mistake also has to cost real winning chances (Lichess's
+   rule: a drop of 0.2+ on its −1..1 scale), so a blunder when the game was
+   already lost — or still won anyway — isn't a puzzle. Blunder / Mistake use
+   Lichess's tiers too (0.3+ / 0.2+).
 
 ## The screens
 
 ### Puzzle Review
 Your own mistakes as puzzles. Click a piece, then its square.
-- A queue with filters: type (Hanging Piece, Fork, …), **Weak spots**
+- A queue with filters: type (Blunder, **Left Hanging** — your move left a
+  piece loose —, Missed Mate, …; Lichess puzzles add Fork, Pin, Hanging
+  Piece — you win a loose piece —, …), **Weak spots**
   (puzzles you keep missing, until solved twice in a row), **Endgames**,
   sharp (one best move) vs quiet positions, and **Kind**: **Attacking** (a
-  forced mate or a forcing sequence that wins material), **Defensive** (you
+  forced mate, or a forcing sequence that wins material — by Lichess's
+  standard: it leaves you +2.00 or better and the first move is the only
+  one that works), **Defensive** (you
   face a threat — in check, or passing would cost 1.5+ pawns — and the answer
   is quiet: no capture, check or attack, as Lichess defines a defensive
   move), **Counterattack** (you face a threat and hit back with a capture,
@@ -88,15 +95,30 @@ Your own mistakes as puzzles. Click a piece, then its square.
   XP, and have their own records, but don't change your stats, Progress or
   weak spots from your games. **Open on Lichess** shows the original game.
 
-### Spot the Tactic
-A game: a position from your games — is there a tactic? Answer, then play.
+### Tactics & Threats
+Two modes, switched at the top of the side panel.
+
+**Is there a tactic?** A position from your games — is there a tactic?
+Answer, then play.
 - A tactic means a forced mate (up to 4 moves) or a **forcing** sequence —
-  checks, captures, new threats — that wins material. About 1 in 3
+  checks, captures, new threats — that wins material, using Lichess's
+  standard: you end up +2.00 or better and only the first move works (it
+  beats the second-best by 0.7 in winning chances). About 1 in 3
   positions are quiet (from move 6 on); there any move within half a pawn
   of the best is fine, in a tactic only the best line counts.
 - Try again before anything is revealed; afterwards step through the line
   with an evaluation bar. Streaks, accuracy ("tactics spotted", "false
   alarms") and XP.
+
+**What's the threat?** Many mistakes start with missing what the opponent's
+last move threatens (Progress → This week shows how many of yours do). A
+position from your games right after your opponent moved:
+1. Name the threat: play the move *they* want to make next (you can move
+   their pieces), or press **No threat** — about 1 in 4 positions have none.
+   A threat is anything that would gain them 1.5+ pawns if you could pass.
+2. Answer it with your move (within half a pawn of the best is good).
+Afterwards: red arrow = their threat, green = the best answer, blue = what
+you played in the game. +3 XP for naming it, +5 for a good answer.
 
 ### Game Review
 Step through any analyzed game: evaluation graph, mistakes marked
@@ -140,7 +162,19 @@ it, and **Repertoire**: where your games leave your prep, plus popular
 Lichess moves your lines don't answer (inside your openings first).
 
 ### Progress
-Rating over time against your goal, blunders per game, puzzles per week.
+- **Overview**: rating over time against your goal, blunders per game,
+  puzzles per week.
+- **Themes**: how often you solve each kind of puzzle — kind, type, phase,
+  Lichess themes and your own tags — weakest first, plus how well you see
+  threats and tactics. **Practice** opens Puzzle Review on that theme
+  (unsolved first); **+ Lichess** adds 100 Lichess puzzles of that theme at
+  your rating.
+- **This week**: your last 7 days — games, rating change, your three
+  costliest mistakes — ranked by how much of your winning chances they threw
+  away, as Lichess judges moves, so turning +4 into −5 counts far more than
+  a blunder when already lost (**Puzzle** to retry, **Review** to see the game), the
+  pattern behind them (e.g. how many came when facing a threat), and what to
+  practise next, one click each.
 
 ### Opponent Prep
 Scout any chess.com player's openings and see whether your repertoire
@@ -148,7 +182,7 @@ covers them.
 
 ### Levels and players
 Practice earns XP (puzzles, sharp-puzzle bonus, clean drill lines, clearing
-weak spots, Spot the Tactic) and levels from Pawn I to King III, shown in the
+weak spots, Tactics & Threats) and levels from Pawn I to King III, shown in the
 sidebar. Several players can share the app: each gets their own database
 (**+ New player** in the sidebar).
 

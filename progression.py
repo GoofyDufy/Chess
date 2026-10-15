@@ -13,6 +13,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import db
 import spot
+import threat
 
 # ---- XP per first try ----
 PUZZLE_XP = {"correct": 10, "near_best": 5, "missed": 2, "revealed": 0}
@@ -64,7 +65,7 @@ def level_for(total_xp: int) -> Level:
 
 
 def total_xp(conn: sqlite3.Connection) -> int:
-    return _attempts_xp(conn) + spot.xp(conn)    # + Spot the Tactic rounds (own table)
+    return _attempts_xp(conn) + spot.xp(conn) + threat.xp(conn)    # + Spot the Tactic / threat rounds (own tables)
 
 
 def _attempts_xp(conn: sqlite3.Connection) -> int:

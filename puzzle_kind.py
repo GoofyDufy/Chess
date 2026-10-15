@@ -2,7 +2,8 @@
 the puzzle (puzzles.solution_ucis / solution_moves / kind):
 
   - Attacking: the solution is a forced mate or a forcing sequence (checks,
-    captures, new threats) that wins material — the rule Spot the Tactic and
+    captures, new threats) that wins material, leaves you +2 or better, with
+    only one first move (Lichess's standard, spot.wins_by_force) — the rule Spot the Tactic and
     multi-move puzzles use (spot.solution_for / spot.forcing_win).
   - Defensive: you're facing a threat and the best move deals with it
     quietly — Lichess's "defensive move": no capture, no check, attacks
@@ -35,6 +36,7 @@ from analyzer import _score_to_cp
 ATTACKING, DEFENSIVE, COUNTERATTACK, POSITIONAL = "Attacking", "Defensive", "Counterattack", "Positional"
 KINDS = (ATTACKING, DEFENSIVE, COUNTERATTACK, POSITIONAL)
 VERSION = "2"              # settings 'puzzle_kind_version': 2 = Counterattack split out of Defensive
+RULES_VERSION = "3"        # settings 'puzzle_rules_version': 3 = Lichess's tactic bar (+2, only move)
 SOLUTION_DEPTH = 16        # same as the puzzle tab's on-the-fly line
 THREAT_DEPTH = 12
 THREAT_CP = 150
@@ -53,8 +55,11 @@ class Result:
 def classify(engine: chess.engine.SimpleEngine, fen: str, best_uci: str) -> Result:
     board = chess.Board(fen)
     best = chess.Move.from_uci(best_uci)
-    info = engine.analyse(board, chess.engine.Limit(depth=SOLUTION_DEPTH))
+    lines = engine.analyse(board, chess.engine.Limit(depth=SOLUTION_DEPTH), multipv=2)
+    info = lines[0]
     pv = list(info.get("pv", []))
+    best_cp = _score_to_cp(info["score"], board.turn)
+    second_cp = _score_to_cp(lines[1]["score"], board.turn) if len(lines) > 1 and lines[1].get("pv") else None
     solution = [best]
     attacking = False
     if pv and pv[0] == best:                      # the engine agrees on the first move
@@ -64,7 +69,7 @@ def classify(engine: chess.engine.SimpleEngine, fen: str, best_uci: str) -> Resu
         if mate:
             solution = spot.mate_line(board, pv) or [best]
             attacking = True
-        elif gain >= spot.MIN_GAIN_PAWNS and length:
+        elif spot.wins_by_force(gain, length, best_cp, second_cp):
             solution = pv[:length]
             attacking = True
     if attacking:
@@ -72,7 +77,7 @@ def classify(engine: chess.engine.SimpleEngine, fen: str, best_uci: str) -> Resu
     if board.is_check():
         return Result(solution, answer_kind(board, best))
     # a threat: what would the opponent get if you could pass?
-    now = _score_to_cp(info["score"], board.turn)
+    now = best_cp
     passed = board.copy(stack=False)
     passed.push(chess.Move.null())
     passed = chess.Board(passed.fen())          # the same position, without the pass in its history
@@ -99,6 +104,13 @@ def answer_kind(board: chess.Board, best: chess.Move) -> str:
         if piece and piece.color == after.turn:     # attacks one of their pieces (pawns too, like Lichess)
             return COUNTERATTACK
     return DEFENSIVE
+
+
+def reset_for_new_rules(conn: sqlite3.Connection) -> None:
+    """The tactic rules changed (RULES_VERSION): forget every kind and saved
+    solution, so the background classifier works them all out again."""
+    with conn:
+        conn.execute("UPDATE puzzles SET kind = NULL, solution_ucis = NULL, solution_moves = NULL")
 
 
 def relabel_defensive(conn: sqlite3.Connection) -> int:

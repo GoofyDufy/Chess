@@ -91,7 +91,7 @@ class Puzzle:
     eval_swing_cp: Optional[int] = None        # magnitude of the mistake
     eval_before_cp: Optional[int] = None       # eval if the best move is played
     eval_after_cp: Optional[int] = None        # eval after the played (mistake) move
-    puzzle_type: Optional[str] = None          # heuristic tag, e.g. "Hanging Piece"
+    puzzle_type: Optional[str] = None          # heuristic tag, e.g. "Left Hanging"
     source_game_id: Optional[str] = None
     opening_line_id: Optional[str] = None
     created_at: dt.datetime = field(default_factory=dt.datetime.now)

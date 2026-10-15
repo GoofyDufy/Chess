@@ -57,7 +57,7 @@ def _numbered(sans: List[str], start: chess.Board) -> str:
 
 
 class SpotTab(ctk.CTkFrame):
-    def __init__(self, master, conn, on_review_game=None):
+    def __init__(self, master, conn, on_review_game=None, mode_switch=None):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
         self.on_review_game = on_review_game
@@ -81,7 +81,7 @@ class SpotTab(ctk.CTkFrame):
         self.your_move: Optional[chess.Move] = None
         self.session = {"rounds": 0, "calls": 0, "moves": 0, "streak": 0, "best": 0}
 
-        self._build_layout()
+        self._build_layout(mode_switch)
         top = self.winfo_toplevel()
         for key, action in (("y", lambda: self._answer(True)), ("n", lambda: self._answer(False)),
                             ("<Return>", self._next_round), ("<space>", self._next_round),
@@ -96,7 +96,7 @@ class SpotTab(ctk.CTkFrame):
 
     # ---------- layout ----------
 
-    def _build_layout(self) -> None:
+    def _build_layout(self, mode_switch=None) -> None:
         left = theme.card(self)
         left.pack(side="left", padx=(24, 12), pady=24, anchor="n")
         pad = ctk.CTkFrame(left, fg_color="transparent")
@@ -136,6 +136,9 @@ class SpotTab(ctk.CTkFrame):
         info.pack(fill="x")
         body = ctk.CTkFrame(info, fg_color="transparent")
         body.pack(fill="x", padx=18, pady=16)
+        theme.fit_wrap(body)
+        if mode_switch:                 # Is there a tactic? / What's the threat? (gui.TrainerPage)
+            mode_switch(body).pack(anchor="w", pady=(0, 10))
         theme.label(body, "Spot the Tactic", "title").pack(anchor="w")
         theme.label(
             body,
@@ -146,20 +149,21 @@ class SpotTab(ctk.CTkFrame):
             f"Scoring: +{spot.CALL_XP} XP for the right answer, +{spot.MOVE_XP} XP for a good move — "
             f"in a tactic position only the best move counts; in a quiet one any move within "
             f"{spot.MOVE_OK_CP / 100:.1f} pawns of the best.",
-            "muted", wraplength=420,
+            "muted", wraplength=300,
         ).pack(anchor="w", fill="x", pady=(4, 0))
 
         scores = theme.card(right)
         scores.pack(fill="x", pady=(16, 0))
         sbody = ctk.CTkFrame(scores, fg_color="transparent")
         sbody.pack(fill="x", padx=18, pady=16)
+        theme.fit_wrap(sbody)
         theme.label(sbody, "THIS SESSION", "section").pack(anchor="w")
         self.session_label = theme.label(sbody, "", "stat")
         self.session_label.pack(anchor="w", pady=(2, 0))
-        self.session_detail = theme.label(sbody, "", "muted", wraplength=420)
+        self.session_detail = theme.label(sbody, "", "muted", wraplength=300)
         self.session_detail.pack(anchor="w")
         theme.label(sbody, "ALL TIME", "section").pack(anchor="w", pady=(14, 0))
-        self.alltime_label = theme.label(sbody, "", "body", wraplength=420)
+        self.alltime_label = theme.label(sbody, "", "body", wraplength=300)
         self.alltime_label.pack(anchor="w", pady=(2, 0))
 
     def _show_buttons(self, *buttons) -> None:

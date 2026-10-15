@@ -99,6 +99,9 @@ class ChessBoardWidget(tk.Canvas):
         # kept through clicks, cleared when a new position is loaded
         self.marked_arrows: list[tuple[int, int, str]] = []
         self.circles: set[int] = set()
+        # a move to highlight instead of the board's last move (e.g. the
+        # opponent's move while a "pass" sits on top of it); reset on load
+        self.highlight_move: Optional[chess.Move] = None
         self._right_press_square: Optional[int] = None
         self.bind("<Button-1>", self._handle_click)
         # Button-3 is right-click on Windows/Linux; Button-2 on macOS
@@ -115,6 +118,7 @@ class ChessBoardWidget(tk.Canvas):
         self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
+        self.highlight_move = None
         self.redraw()
 
     def show_board(self, board: chess.Board, flipped: Optional[bool] = None) -> None:
@@ -129,6 +133,7 @@ class ChessBoardWidget(tk.Canvas):
         self.circles.clear()
         self.selected_square = None
         self.legal_targets = set()
+        self.highlight_move = None
         self.redraw()
 
     def clear(self) -> None:
@@ -200,8 +205,9 @@ class ChessBoardWidget(tk.Canvas):
         self.delete("all")
         if self.board is None:
             return
-        last_move = self.board.move_stack[-1] if self.board.move_stack else None
-        last_squares = {last_move.from_square, last_move.to_square} if last_move else set()
+        last_move = (self.highlight_move if self.highlight_move is not None
+                     else self.board.move_stack[-1] if self.board.move_stack else None)
+        last_squares = {last_move.from_square, last_move.to_square} if last_move else set()   # a pass: none
 
         for row in range(8):
             for col in range(8):

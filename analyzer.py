@@ -20,6 +20,7 @@ mean every threshold change requires re-running Stockfish on everything.
 from __future__ import annotations
 
 import io
+import math
 import os
 import queue
 import threading
@@ -47,6 +48,22 @@ DECISIVE_EVAL_CP = 600
 
 # Mate scores are clamped to +/- this value so comparisons still work.
 MATE_CP = 10000
+
+# A mistake has to cost you real winning chances to become a puzzle — Lichess's
+# move labels (winning chances on a -1..1 scale): a drop of 0.2+ is a mistake,
+# 0.3+ a blunder. So -8 -> mated, or +10 -> +6, isn't a puzzle; +4 -> -5 is.
+MIN_CHANCES_LOST = 0.2
+BLUNDER_CHANCES_LOST = 0.3
+RULES_VERSION = "1"       # settings 'puzzle_cost_version': 1 = the winning-chances rule
+
+
+def win_chances(cp: int) -> float:
+    """Lichess's winning chances, -1 (lost) .. 1 (won), from centipawns."""
+    return 2 / (1 + math.exp(-0.00368208 * cp)) - 1
+
+
+def chances_lost(cp_before: int, cp_after: int) -> float:
+    return win_chances(cp_before) - win_chances(cp_after)
 
 # How many top engine moves to record per position (best + 2nd + 3rd).
 MULTI_PV = 3
@@ -82,9 +99,14 @@ _PIECE_VALUES = {
 }
 
 
+# your move left one of your pieces loose. Not Lichess's "Hanging piece",
+# which is the opposite: a puzzle where you win an undefended piece.
+LEFT_HANGING = "Left Hanging"
+
+
 def _classify_puzzle_type(
     board_before: chess.Board, move: chess.Move, my_color: chess.Color,
-    cp_before: int, swing: int,
+    cp_before: int, swing: int, lost: float = 1.0,
 ) -> str:
     # you had a forced mate available and didn't take it (cp_before hits
     # the mate clamp only when the engine reported a mate for you)
@@ -104,16 +126,37 @@ def _classify_puzzle_type(
             if board_after.attackers(opponent, square) and not board_after.attackers(my_color, square):
                 worst_hanging_value = max(worst_hanging_value, _PIECE_VALUES.get(piece.piece_type, 0))
     if worst_hanging_value >= 3:  # minor piece or better left hanging
-        return "Hanging Piece"
+        return LEFT_HANGING
 
-    # fallback: classify by severity alone, same tiers chess.com/lichess
-    # use for move-quality labels
-    if swing >= 300:
+    # fallback: by severity, Lichess's tiers (winning chances lost)
+    if lost >= BLUNDER_CHANCES_LOST:
         return "Blunder"
-    elif swing >= 150:
+    elif lost >= MIN_CHANCES_LOST:
         return "Mistake"
     else:
         return "Inaccuracy"
+
+
+def apply_chances_rule(conn) -> tuple:
+    """One-off (RULES_VERSION 1) for saved puzzles: removes the ones that
+    didn't cost real winning chances and re-labels Blunder / Mistake by
+    Lichess's tiers — in place, so kinds, solutions and ids are kept.
+    Returns (removed, relabelled)."""
+    removed, relabel = [], []
+    for pid, before, after, ptype in conn.execute(
+            "SELECT id, eval_before_cp, eval_after_cp, puzzle_type FROM puzzles WHERE eval_after_cp IS NOT NULL"):
+        lost = chances_lost(before or 0, after)
+        if lost < MIN_CHANCES_LOST:
+            removed.append((pid,))
+        elif ptype in ("Blunder", "Mistake", "Inaccuracy"):
+            new = "Blunder" if lost >= BLUNDER_CHANCES_LOST else "Mistake"
+            if new != ptype:
+                relabel.append((new, pid))
+    with conn:
+        conn.executemany("DELETE FROM review_state WHERE puzzle_id = ?", removed)
+        conn.executemany("DELETE FROM puzzles WHERE id = ?", removed)
+        conn.executemany("UPDATE puzzles SET puzzle_type = ? WHERE id = ?", relabel)
+    return len(removed), len(relabel)
 
 
 def _my_chess_color(game: Game) -> chess.Color:
@@ -283,6 +326,9 @@ def puzzles_from_evaluations(
         swing = ev.cp_before - ev.cp_after
         if swing < threshold_cp:
             continue
+        lost = chances_lost(ev.cp_before, ev.cp_after)
+        if lost < MIN_CHANCES_LOST:          # the game was decided either way
+            continue
 
         board = chess.Board(ev.fen_before)
         move = chess.Move.from_uci(ev.move_uci)
@@ -296,7 +342,7 @@ def puzzles_from_evaluations(
             eval_swing_cp=swing,
             eval_before_cp=ev.cp_before,
             eval_after_cp=ev.cp_after,
-            puzzle_type=_classify_puzzle_type(board, move, board.turn, ev.cp_before, swing),
+            puzzle_type=_classify_puzzle_type(board, move, board.turn, ev.cp_before, swing, lost),
             source_game_id=ev.game_id,
         ))
     return puzzles

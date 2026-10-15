@@ -166,6 +166,8 @@ def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:
     lichess_puzzles.ensure_schema(conn)
     import puzzle_tags                     # tags you add to puzzles
     puzzle_tags.ensure_schema(conn)
+    import threat                          # What's the threat? rounds
+    threat.ensure_schema(conn)
     _migrate(conn)
     return conn
 
@@ -204,6 +206,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col, col_type in (("solution_ucis", "TEXT"), ("solution_moves", "INTEGER"), ("kind", "TEXT")):
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE puzzles ADD COLUMN {col} {col_type}")
+    # renamed: "Hanging Piece" means winning a loose piece on Lichess; ours is leaving one
+    conn.execute("UPDATE puzzles SET puzzle_type = 'Left Hanging' WHERE puzzle_type = 'Hanging Piece'")
     opening_cols = {row["name"] for row in conn.execute("PRAGMA table_info(opening_lines)")}
     if "line_name" not in opening_cols:
         conn.execute("ALTER TABLE opening_lines ADD COLUMN line_name TEXT")

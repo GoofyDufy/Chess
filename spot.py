@@ -38,9 +38,8 @@ import chess
 import chess.engine
 import chess.pgn
 
-from analyzer import MATE_CP, _score_to_cp
+from analyzer import MATE_CP, _score_to_cp, win_chances  # noqa: F401  (spot.win_chances)
 from explain import VALUES
-from style import ONLY_MOVE_GAP_CP
 
 QUIET_SHARE = 1 / 3
 MIN_QUIET_PLY = 10            # quiet positions only after both sides have played 5 moves
@@ -49,9 +48,11 @@ MIN_GAIN_PAWNS = 1            # material a forcing line must net
 FORCING_PLIES = 8             # how far down the engine line a forcing win is looked for
 MAX_MATE = 4                  # forced mates up to this many moves count
 MAX_SOLUTION_MOVES = 4        # longest sequence you play (FORCING_PLIES covers it)
-MIN_WINNING_CP = 100          # ...and the position must actually be good for you after it
+MIN_WINNING_CP = 200          # ...and you must stand clearly better after it (Lichess: +2.00)
+ONLY_MOVE_WIN_GAP = 0.7       # ...and the first move must be the only one: Lichess's rule, best beats
+                              # 2nd best by 0.7 in winning chances (-1..1), e.g. +3 vs no better than -0.5
 MOVE_OK_CP = 50               # quiet positions: a move within half a pawn of the best is good
-MAX_START_CP = 400            # skip positions already decided either way
+LICHESS_TOO_WINNING_CP = 300  # tactics: not if you were already this far ahead before their move (Lichess)
 CLASSIFY_DEPTH = 14
 JUDGE_DEPTH = 12
 LINE_DEPTH = 18               # the walk-through line (a time limit often stops with a 1-2 move line)
@@ -118,14 +119,18 @@ def candidates(conn: sqlite3.Connection, quiet: bool, exclude: set, limit: int =
                  ORDER BY RANDOM() LIMIT ?"""
         args: tuple = (MIN_QUIET_PLY, limit)
     else:
-        # only-move positions, or your opponent's last move just handed you 2+ pawns
-        sql = """SELECT e.game_id, e.ply, e.fen_before, e.move_uci FROM move_evaluations e
-                 LEFT JOIN move_evaluations prev ON prev.game_id = e.game_id AND prev.ply = e.ply - 2
-                 WHERE e.cp_second IS NOT NULL AND abs(e.cp_before) < ?
-                   AND (e.cp_before - e.cp_second >= ?
-                        OR (prev.cp_after IS NOT NULL AND e.cp_before - prev.cp_after >= 200))
-                 ORDER BY RANDOM() LIMIT ?"""
-        args = (MAX_START_CP, ONLY_MOVE_GAP_CP, limit)
+        # by the saved analysis already +2 with only one move (Lichess's bar, see
+        # wins_by_force), and you weren't winning big before their last move
+        rows = conn.execute(
+            """SELECT e.game_id, e.ply, e.fen_before, e.move_uci, e.cp_before, e.cp_second
+               FROM move_evaluations e
+               LEFT JOIN move_evaluations prev ON prev.game_id = e.game_id AND prev.ply = e.ply - 2
+               WHERE e.cp_second IS NOT NULL AND e.cp_before >= ? AND e.cp_before - e.cp_second >= 150
+                 AND (prev.cp_after IS NULL OR prev.cp_after < ?)""",
+            (MIN_WINNING_CP, LICHESS_TOO_WINNING_CP)).fetchall()
+        rows = [r for r in rows if r[2] not in exclude and is_only_move(r[4], max(r[5], -MATE_CP))]
+        random.shuffle(rows)
+        return [Candidate(r[0], r[1], r[2], r[3]) for r in rows[:limit]]
     out = []
     for r in conn.execute(sql, args):
         if r[2] in exclude:
@@ -242,6 +247,17 @@ def mate_line(board: chess.Board, pv: List[chess.Move]) -> List[chess.Move]:
     return line
 
 
+def is_only_move(best_cp: int, second_cp: Optional[int]) -> bool:
+    return second_cp is None or win_chances(best_cp) > win_chances(second_cp) + ONLY_MOVE_WIN_GAP
+
+
+def wins_by_force(gain: int, length: int, best_cp: int, second_cp: Optional[int]) -> bool:
+    """A material tactic, Lichess's standard: a forcing line that nets
+    material, leaves you +2 or better, and has only one first move."""
+    return (gain >= MIN_GAIN_PAWNS and length > 0 and best_cp >= MIN_WINNING_CP
+            and is_only_move(best_cp, second_cp))
+
+
 def solution_for(board: chess.Board, pv: List[chess.Move], score: chess.engine.PovScore,
                  just_lost: int = 0) -> List[chess.Move]:
     """The moves to play (yours and the opponent's replies, ending with
@@ -263,7 +279,7 @@ def solution_for(board: chess.Board, pv: List[chess.Move], score: chess.engine.P
 
 def classify(engine: chess.engine.SimpleEngine, board: chess.Board, just_lost: int = 0) -> Verdict:
     """Tactic = forced mate (MAX_MATE moves or fewer) or a forcing sequence
-    that wins material. Quiet = neither, and the second-best move is within
+    that wins material, with only one first move (wins_by_force). Quiet = neither, and the second-best move is within
     MOVE_OK_CP of the best. Anything else (sharp but not tactical, e.g. an
     only-move defence) is "unclear" and isn't used for a round.
 
@@ -282,7 +298,7 @@ def classify(engine: chess.engine.SimpleEngine, board: chess.Board, just_lost: i
         return Verdict(True, "mate", best, best_cp, second_cp, pv, mate_in=pov.mate(),
                        solution=mate_line(board, pv) or [best])
     gain, length = forcing_win(board, pv, just_lost)
-    if gain >= MIN_GAIN_PAWNS and best_cp >= MIN_WINNING_CP:
+    if wins_by_force(gain, length, best_cp, second_cp):
         return Verdict(True, "material", best, best_cp, second_cp, pv, gain=gain, solution=pv[:length])
     if second_cp is not None and best_cp - second_cp < MOVE_OK_CP and not pov.is_mate():
         return Verdict(False, "quiet", best, best_cp, second_cp, pv, solution=[best])

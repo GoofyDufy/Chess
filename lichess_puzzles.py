@@ -121,8 +121,8 @@ def parse(row: List[str]) -> Optional[Dict]:
         return None
 
 
-def good(p: Dict, min_rating: int, max_rating: int) -> bool:
-    return (min_rating <= p["rating"] <= max_rating and p["popularity"] >= MIN_POPULARITY
+def good(p: Dict, min_rating: int, max_rating: int, theme: str = "") -> bool:
+    return ((not theme or theme in p["themes"].split()) and min_rating <= p["rating"] <= max_rating and p["popularity"] >= MIN_POPULARITY
             and p["plays"] >= MIN_PLAYS and p["deviation"] <= MAX_RATING_DEVIATION)
 
 
@@ -135,10 +135,11 @@ def rows(stream: io.TextIOBase) -> Iterator[List[str]]:
 def download(min_rating: int, max_rating: int, count: int, skip: set,
              on_batch: Callable[[List[Dict]], None], stop: threading.Event,
              on_progress: Optional[Callable[[int, int], None]] = None, batch: int = 500,
-             open_stream: Optional[Callable[[], io.TextIOBase]] = None) -> int:
+             open_stream: Optional[Callable[[], io.TextIOBase]] = None, theme: str = "") -> int:
     """Streams the Lichess file and hands batches of new, good puzzles to
     on_batch (from this thread — the caller saves them on its own thread).
-    on_progress(found, scanned). Returns how many were found."""
+    on_progress(found, scanned). theme: only puzzles with this Lichess theme.
+    Returns how many were found."""
     found, scanned, pending = 0, 0, []
     stream, close = (open_stream(), None) if open_stream else _open_remote()
     try:
@@ -149,7 +150,7 @@ def download(min_rating: int, max_rating: int, count: int, skip: set,
             if row and row[0] in skip:
                 continue
             p = parse(row) if row else None
-            if p is None or not good(p, min_rating, max_rating):
+            if p is None or not good(p, min_rating, max_rating, theme):
                 if on_progress and scanned % 20000 == 0:
                     on_progress(found, scanned)
                 continue

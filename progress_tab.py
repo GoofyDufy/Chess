@@ -13,17 +13,20 @@ import charts
 import db
 import progress_data
 import theme
+from progress_views import ThemesView, WeekView
 
 TIME_CLASSES = ["Rapid", "Blitz", "Bullet", "Daily"]
+OVERVIEW, THEMES, WEEK = "Overview", "Themes", "This week"
 DEFAULT_GOAL = "2000"
 
 
 class ProgressTab(ctk.CTkFrame):
-    def __init__(self, master, conn):
+    def __init__(self, master, conn, actions=None):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
+        self.actions = actions or {}
         self._build()
-        self.bind("<Map>", lambda e: self.after(50, self.refresh))
+        self.bind("<Map>", lambda e: self.after(50, self._refresh_view))
 
     def _build(self) -> None:
         outer = ctk.CTkFrame(self, fg_color="transparent")
@@ -32,6 +35,17 @@ class ProgressTab(ctk.CTkFrame):
         top = ctk.CTkFrame(outer, fg_color="transparent")
         top.pack(fill="x")
         theme.label(top, "Progress", "title").pack(side="left")
+        self.view_var = tk.StringVar(value=OVERVIEW)
+        ctk.CTkSegmentedButton(
+            top, values=[OVERVIEW, THEMES, WEEK], variable=self.view_var, command=lambda _: self._show_view(),
+            font=theme.FONT_BOLD, height=32, fg_color=theme.PANEL_ALT, selected_color=theme.BORDER_STRONG,
+            selected_hover_color=theme.BORDER_STRONG, unselected_color=theme.PANEL_ALT,
+            unselected_hover_color=theme.CONTROL_BG, text_color=theme.TEXT_SOFT,
+        ).pack(side="left", padx=(20, 0))
+        # rating controls: Overview only
+        self.overview_controls = ctk.CTkFrame(top, fg_color="transparent")
+        self.overview_controls.pack(side="right")
+        top = self.overview_controls
         self.class_var = tk.StringVar(value=db.get_setting(self.conn, "progress_class") or "Rapid")
         theme.option_menu(top, TIME_CLASSES, self.class_var, lambda _: self.refresh(), width=120).pack(side="right")
         self.goal_var = tk.StringVar(value=db.get_setting(self.conn, "rating_goal") or DEFAULT_GOAL)
@@ -41,6 +55,12 @@ class ProgressTab(ctk.CTkFrame):
         goal_entry.bind("<FocusOut>", lambda e: self.refresh())
         theme.label(top, "Goal", "muted").pack(side="right", padx=(0, 8))
 
+        self.views_parent = outer
+        self.themes_view = ThemesView(outer, self.conn, self.actions)
+        self.week_view = WeekView(outer, self.conn, self.actions)
+        self.overview = ctk.CTkFrame(outer, fg_color="transparent")
+        self.overview.pack(fill="both", expand=True)
+        outer = self.overview
         self.tiles = ctk.CTkFrame(outer, fg_color="transparent")
         self.tiles.pack(fill="x", pady=(14, 0))
         self.tile_labels = []
@@ -74,6 +94,31 @@ class ProgressTab(ctk.CTkFrame):
         canvas = tk.Canvas(card, height=150, width=300, bg=theme.PANEL_BG, highlightthickness=0)
         canvas.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         return canvas
+
+    def show(self, view: str) -> None:
+        self.view_var.set(view)
+        self._show_view()
+
+    def _show_view(self) -> None:
+        view = self.view_var.get()
+        for frame in (self.overview, self.themes_view, self.week_view):
+            frame.pack_forget()
+        if view == OVERVIEW:
+            self.overview_controls.pack(side="right")
+            self.overview.pack(fill="both", expand=True, pady=(0, 0))
+        else:
+            self.overview_controls.pack_forget()
+            (self.themes_view if view == THEMES else self.week_view).pack(fill="both", expand=True, pady=(14, 0))
+        self._refresh_view()
+
+    def _refresh_view(self) -> None:
+        view = self.view_var.get()
+        if view == THEMES:
+            self.themes_view.refresh()
+        elif view == WEEK:
+            self.week_view.refresh()
+        else:
+            self.refresh()
 
     def refresh(self) -> None:
         tclass = self.class_var.get()

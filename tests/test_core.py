@@ -24,6 +24,9 @@ import progression  # noqa: E402
 import puzzle_kind  # noqa: E402
 import puzzle_tags  # noqa: E402
 import spot  # noqa: E402
+import theme_stats  # noqa: E402
+import threat  # noqa: E402
+import weekly  # noqa: E402
 import repertoire_gaps  # noqa: E402
 from drill import OpeningDrillSession  # noqa: E402
 from models import Game, GameResult, MoveEvaluation, PlayerColor, time_class  # noqa: E402
@@ -477,6 +480,19 @@ class PuzzleKindTests(unittest.TestCase):
         calm = FakeEngine({key: [(["e2e4"], 20)], self.passed_key(fen): [([], -10)]})
         self.assertEqual(puzzle_kind.classify(calm, fen, "e2e4").kind, "Positional")
 
+    def test_lichess_tactic_bar(self):
+        self.assertAlmostEqual(spot.win_chances(0), 0.0)
+        self.assertTrue(spot.wins_by_force(9, 1, 900, None))           # only one line: an only move
+        self.assertFalse(spot.wins_by_force(1, 1, 150, -300))          # not +2
+        self.assertFalse(spot.wins_by_force(3, 1, 400, 250))           # 2nd best wins too
+        self.assertTrue(spot.wins_by_force(3, 1, 400, -100))
+        # Nxd5 wins the queen, but if another move is nearly as good it isn't a tactic
+        board = chess.Board(self.HANGING)
+        key = board.fen().split()[0]
+        two = FakeEngine({key: [(["c3d5", "c7c6", "d5c3"], 900), (["f1b5", "c7c6", "b5e2"], 700)],
+                          self.passed_key(self.HANGING): [([], 900)]})
+        self.assertNotEqual(puzzle_kind.classify(two, self.HANGING, "c3d5").kind, "Attacking")
+
     def test_hitting_back_is_counterattack_quiet_is_defensive(self):
         # Black's queen on d5 is attacked by Nc3; the answer hits back or just steps away
         board = chess.Board("4k3/8/8/3q4/8/2N5/8/4K3 b - - 0 1")
@@ -688,6 +704,91 @@ class LichessPuzzleTests(unittest.TestCase):
         self.assertEqual(puzzle_tags.all_user_tags(conn), {"Opening trap": {puzzle_tags.key(own)}})
         puzzle_tags.remove(conn, rebuilt, "Opening trap")
         self.assertEqual(puzzle_tags.user_tags(conn, own), [])
+
+
+class ThreatDrillTests(unittest.TestCase):
+    # White to move; Black's bishop on b4 pins nothing yet, but ...Bxc3 would win the knight
+    FEN = "rnbqk1nr/pppp1ppp/8/4p3/1b2P3/2N5/PPPP1PPP/R1BQKBNR w KQkq - 2 3"
+
+    class TurnEngine(FakeEngine):
+        """Keyed by placement + side to move: a pass leaves the pieces as they are."""
+        def analyse(self, board, limit, multipv=None):
+            key = " ".join(board.fen().split()[:2])
+            return FakeEngine({board.fen().split()[0]: self.table[key]}).analyse(board, limit, multipv)
+
+    def engine(self, threat_gain):
+        board = chess.Board(self.FEN)
+        key = lambda b: " ".join(b.fen().split()[:2])
+        # you: +0.2 with Nf3; if you passed, their best move gains them threat_gain
+        return self.TurnEngine({key(board): [(["g1f3"], 20)],
+                                key(threat.passed(board)): [(["b4c3"], threat_gain - 20), (["g8f6"], 0)]})
+
+    def test_a_real_threat_and_a_calm_position(self):
+        board = chess.Board(self.FEN)
+        a = threat.assess(self.engine(300), board)
+        self.assertTrue(a.has_threat)
+        self.assertEqual(a.threats[0].move.uci(), "b4c3")
+        self.assertIn("taking your knight", threat.describe(board, a.threats[0]))
+        self.assertFalse(threat.assess(self.engine(30), board).has_threat)
+        self.assertIsNone(threat.assess(self.engine(100), board))      # a small threat: not used
+
+    def test_scored_and_counted(self):
+        conn = fresh_conn()
+        threat.record(conn, self.FEN, True, True, False)
+        threat.record(conn, self.FEN, False, True, True)
+        s = threat.summary(conn)
+        self.assertEqual((s.rounds, s.found, s.calm_right, s.answers_ok), (2, 1, 1, 1))
+        self.assertEqual(threat.xp(conn), 2 * threat.FOUND_XP + threat.ANSWER_XP)
+        self.assertEqual(progression.total_xp(conn), threat.xp(conn))
+
+
+class ThemesAndWeekTests(unittest.TestCase):
+    def setUp(self):
+        self.conn = fresh_conn()
+        pgn = '[Event "x"]\n[WhiteElo "1500"]\n\n1. e4 e5 *\n'
+        db.save_game(self.conn, Game(id="g1", chess_com_url="u", pgn=pgn, played_at=dt.datetime.now(),
+                                     time_control="300", my_color=PlayerColor.WHITE,
+                                     opponent_username="opp", result=GameResult.LOSS))
+        evals = [ev(0, START, "e2e4", "d2d4", 30, -400)]
+        db.save_game_evaluations(self.conn, "g1", evals)
+        self.p = analyzer.puzzles_from_evaluations(evals, 150)[0]
+        db.replace_puzzles_for_games(self.conn, ["g1"], [self.p])
+        puzzle_kind.save(self.conn, self.p.id, puzzle_kind.Result([chess.Move.from_uci("d2d4")], "Counterattack"))
+
+    def test_theme_rates_from_first_tries(self):
+        for correct in (False, False, True):
+            db.record_attempt(self.conn, "puzzle", self.p.id, correct, "correct" if correct else "missed")
+        rows = {r.tag: r for r in theme_stats.theme_rows(self.conn)}
+        self.assertEqual((rows["Counterattack"].solved, rows["Counterattack"].tries), (1, 3))
+        self.assertNotIn("One move", rows)                     # length isn't a theme
+        self.assertEqual(theme_stats.theme_rows(self.conn)[0].tag, "Counterattack")
+
+    def test_costliest_means_lost_winning_chances_not_pawns(self):
+        after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+        evals = [ev(0, START, "e2e4", "d2d4", -900, -analyzer.MATE_CP),     # already lost, then mated
+                 ev(1, after_e4, "e7e5", "c7c5", 400, -400)]                # winning -> losing
+        db.save_game_evaluations(self.conn, "g1", evals)
+        db.replace_puzzles_for_games(self.conn, ["g1"], analyzer.puzzles_from_evaluations(evals, 150))
+        top = weekly.review(self.conn).mistakes
+        # the blunder when already lost isn't even a puzzle (analyzer.MIN_CHANCES_LOST)
+        self.assertEqual([m.played_san for m in top], ["e5"])
+        self.assertIn("winning → losing", top[0].swing_text())
+
+    def test_saved_puzzles_refiltered_in_place(self):
+        lost = analyzer.puzzles_from_evaluations([ev(0, START, "e2e4", "d2d4", 30, -400)], 150)[0]
+        lost.eval_before_cp, lost.eval_after_cp, lost.id = -900, -analyzer.MATE_CP, "old"
+        db.replace_puzzles_for_games(self.conn, ["g2"], [lost])
+        self.conn.execute("UPDATE puzzles SET source_game_id = 'g2', puzzle_type = 'Mistake' WHERE id = ?", (self.p.id,))
+        removed, relabelled = analyzer.apply_chances_rule(self.conn)
+        self.assertEqual((removed, relabelled), (1, 1))                  # 30 -> -400 is a blunder
+        self.assertEqual([(p.id, p.puzzle_type, p.kind) for p in db.all_puzzles(self.conn)],
+                         [(self.p.id, "Blunder", "Counterattack")])       # kind kept
+
+    def test_week_finds_the_mistake_and_the_threat_pattern(self):
+        w = weekly.review(self.conn)
+        self.assertEqual((w.games, w.losses, w.analyzed, w.mistake_count, w.facing_threat), (1, 1, 1, 1, 1))
+        self.assertEqual(w.mistakes[0].played_san, "e4")
+        self.assertIn("threats", [s.action for s in w.suggestions])
 
 
 if __name__ == "__main__":

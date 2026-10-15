@@ -32,7 +32,7 @@ from level_card import LevelCard
 from progress_tab import ProgressTab
 from puzzle_tab import PuzzleReviewTab
 from scout_tab import ScoutTab
-from spot_tab import SpotTab
+from trainer_page import THREAT, TACTIC, TrainerPage
 from stats_tab import StatsTab
 
 SIDEBAR_WIDTH = 200
@@ -163,12 +163,29 @@ class App(ctk.CTk):
         stats_tab = StatsTab(content, self.conn, on_drill=drill_opening,
                              on_repertoire_changed=drill_tab._refresh_repertoire_list,
                              on_review_game=review_game)
-        progress_tab = ProgressTab(content, self.conn)
-        spot_tab = SpotTab(content, self.conn, on_review_game=review_game)
+        trainer = TrainerPage(content, self.conn, on_review_game=review_game)
+
+        def go(page, then=None):
+            self.show_page(page)
+            if then:
+                then()
+
+        def open_puzzle(puzzle_id):
+            self.show_page("Puzzle Review")
+            puzzle_tab.open_puzzle(puzzle_id)
+
+        progress_tab = ProgressTab(content, self.conn, actions={
+            "practice_theme": lambda tag: go("Puzzle Review", lambda: puzzle_tab.practice_theme(tag)),
+            "open_puzzle": open_puzzle,
+            "review_game": review_game,
+            "threats": lambda: go("Tactics & Threats", lambda: trainer.show_mode(THREAT)),
+            "tactics": lambda: go("Tactics & Threats", lambda: trainer.show_mode(TACTIC)),
+            "analyze": lambda: go("Import & Analyze"),
+        })
         scout_tab = ScoutTab(content, self.conn)
 
         for name, page in (("Import & Analyze", puzzle_tab.import_page),
-                           ("Puzzle Review", puzzle_tab), ("Spot the Tactic", spot_tab),
+                           ("Puzzle Review", puzzle_tab), ("Tactics & Threats", trainer),
                            ("Game Review", review_tab),
                            ("Opening Drill", drill_tab), ("Stats", stats_tab),
                            ("Progress", progress_tab), ("Opponent Prep", scout_tab)):

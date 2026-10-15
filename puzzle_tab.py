@@ -46,7 +46,7 @@ from models import TIME_FILTERS, Game, Puzzle, PuzzleSource
 
 TYPE_COLORS = {
     "Missed Mate": theme.ERROR,
-    "Hanging Piece": theme.WARNING,
+    analyzer.LEFT_HANGING: theme.WARNING,
     "Blunder": theme.ERROR,
     "Mistake": theme.INFO,
     "Inaccuracy": theme.TEXT_MUTED,
@@ -72,6 +72,7 @@ KIND_OPTIONS = [ALL_KINDS, puzzle_kind.ATTACKING, puzzle_kind.DEFENSIVE, puzzle_
                 puzzle_kind.POSITIONAL, MULTI_STEP]
 CARD_CONTENT_WIDTH = 520    # the board card's inside width
 TAG_PREFIX = "Tag: "        # Type filter entries for the tags you've added
+THEME_PREFIX = "Theme: "    # practising one theme (Progress → Themes): any puzzle with that tag
 
 DEFAULT_THRESHOLD_PAWNS = "1.5"
 DEFAULT_GAMES_PER_RUN = "50"
@@ -172,6 +173,15 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.import_page = ctk.CTkFrame(master, fg_color="transparent")
         # new puzzles get their kind / solution worked out in the background (puzzle_kind.py)
         self._classify_stop: Optional[threading.Event] = None
+        if db.get_setting(conn, "puzzle_cost_version") != analyzer.RULES_VERSION:
+            # puzzles must cost real winning chances (analyzer.MIN_CHANCES_LOST)
+            analyzer.apply_chances_rule(conn)
+            db.set_setting(conn, "puzzle_cost_version", analyzer.RULES_VERSION)
+        if db.get_setting(conn, "puzzle_rules_version") != puzzle_kind.RULES_VERSION:
+            # new tactic rules: every puzzle is classified again in the background
+            puzzle_kind.reset_for_new_rules(conn)
+            db.set_setting(conn, "puzzle_rules_version", puzzle_kind.RULES_VERSION)
+            db.set_setting(conn, "puzzle_kind_version", puzzle_kind.VERSION)    # nothing left to relabel
         if db.get_setting(conn, "puzzle_kind_version") != puzzle_kind.VERSION:
             puzzle_kind.relabel_defensive(conn)
             db.set_setting(conn, "puzzle_kind_version", puzzle_kind.VERSION)
@@ -691,6 +701,31 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.type_filter_dropdown.configure(
             values=values + [TAG_PREFIX + t for t in sorted(self._user_tags, key=str.lower)])
 
+    # ---------- opened from elsewhere (Progress) ----------
+
+    def _clear_filters(self, source: str) -> None:
+        self.source_var.set(source)
+        self.kind_var.set(ALL_KINDS)
+        self.position_var.set(ALL_POSITIONS)
+        self.type_filter_var.set("All types")
+
+    def practice_theme(self, tag: str) -> None:
+        """The queue: every puzzle (yours and Lichess) with this tag, unsolved first."""
+        self._clear_filters(BOTH_SOURCES)
+        self.type_filter_var.set(THEME_PREFIX + tag)
+        self._reload_queue()
+
+    def open_puzzle(self, puzzle_id: str) -> bool:
+        """Shows one of your games' puzzles (filters cleared so it's in the queue)."""
+        self._clear_filters(MY_GAMES)
+        self.focus_var.set("All games")
+        self._reload_queue()
+        index = next((i for i, p in enumerate(self.queue) if p.id == puzzle_id), None)
+        if index is None:
+            return False
+        self._load_puzzle_at(index)
+        return True
+
     def _on_source_filter(self) -> None:
         db.set_setting(self.conn, "puzzle_source", self.source_var.get())
         self._reload_queue()
@@ -738,13 +773,15 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._user_tags = puzzle_tags.all_user_tags(self.conn)
         options = (["All types", WEAK_SPOTS, ENDGAMES] + sorted(types)
                    + [TAG_PREFIX + t for t in sorted(self._user_tags, key=str.lower)])
+        if self.type_filter_var.get().startswith(THEME_PREFIX):
+            options.append(self.type_filter_var.get())
         self.type_filter_dropdown.configure(values=options)
         if self.type_filter_var.get() not in options:
             self.type_filter_var.set("All types")
 
         selected_type = self.type_filter_var.get()
         filter_type = (None if selected_type in ("All types", WEAK_SPOTS, ENDGAMES)
-                       or selected_type.startswith(TAG_PREFIX) else selected_type)
+                       or selected_type.startswith((TAG_PREFIX, THEME_PREFIX)) else selected_type)
         self.queue = (db.all_puzzles(self.conn, puzzle_type=filter_type, time_classes=self._focus_classes())
                       if mine else [])
         if lichess:            # the Games (time control) filter is about your games only
@@ -760,6 +797,13 @@ class PuzzleReviewTab(ctk.CTkFrame):
         elif selected_type.startswith(TAG_PREFIX):
             keys = self._user_tags.get(selected_type[len(TAG_PREFIX):], set())
             self.queue = [p for p in self.queue if puzzle_tags.key(p) in keys]
+        elif selected_type.startswith(THEME_PREFIX):
+            want = selected_type[len(THEME_PREFIX):].lower()
+            keys = {k for t, ks in self._user_tags.items() if t.lower() == want for k in ks}
+            self.queue = [p for p in self.queue if puzzle_tags.key(p) in keys or want in
+                          {t.lower() for t in puzzle_tags.auto_tags(p, False, stats.is_endgame(p.fen))}]
+            # ones you haven't solved yet first
+            self.queue.sort(key=lambda p: (self.records.get(p.id) or {}).get("correct", 0) > 0)
         kind = self.kind_var.get()
         if kind == MULTI_STEP:
             self.queue = [p for p in self.queue if (p.solution_moves or 0) > 1]

@@ -46,6 +46,29 @@ _LATE_THEMES = {"crushing", "advantage", "equality", "opening", "middlegame", "e
                 "short", "long", "veryLong", "master", "masterVsMaster", "superGM", "mate"}
 
 
+# Lichess theme ids a download can ask for (lichess.org/training/themes)
+LICHESS_THEMES = (
+    "fork", "pin", "skewer", "discoveredAttack", "doubleCheck", "hangingPiece", "trappedPiece", "sacrifice",
+    "deflection", "attraction", "interference", "clearance", "intermezzo", "xRayAttack", "quietMove",
+    "defensiveMove", "zugzwang", "promotion", "advancedPawn", "exposedKing", "kingsideAttack",
+    "queensideAttack", "backRankMate", "smotheredMate", "mate", "mateIn1", "mateIn2", "mateIn3", "mateIn4",
+    "endgame", "rookEndgame", "pawnEndgame", "bishopEndgame", "knightEndgame", "queenEndgame",
+    "capturingDefender", "attackingF2F7", "opening", "middlegame",
+)
+# our kinds that match a Lichess theme
+_KIND_THEMES = {"Defensive": "defensiveMove", "Positional": "quietMove"}
+
+
+def lichess_theme(tag: str) -> str:
+    """The Lichess theme id for a tag ('Hanging piece' -> 'hangingPiece'), or ''."""
+    if tag in _KIND_THEMES:
+        return _KIND_THEMES[tag]
+    for theme in LICHESS_THEMES:
+        if theme_name(theme).lower() == tag.lower():
+            return theme
+    return ""
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
 

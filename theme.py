@@ -118,6 +118,16 @@ def label(master, text: str = "", kind: str = "body", **kwargs) -> ctk.CTkLabel:
     return ctk.CTkLabel(master, text=text, font=font, **kwargs)
 
 
+def fit_wrap(frame, margin: int = 6) -> None:
+    """Wrap the frame's wrapping labels to its real width (a side panel's
+    width depends on the screen) instead of a fixed wraplength."""
+    def apply(event):
+        for w in frame.winfo_children():
+            if isinstance(w, ctk.CTkLabel) and w.cget("wraplength"):
+                w.configure(wraplength=max(120, event.width - margin))
+    frame.bind("<Configure>", apply, add="+")
+
+
 def card(master, **kwargs) -> ctk.CTkFrame:
     """Rounded, bordered panel used to group controls."""
     kwargs.setdefault("fg_color", PANEL_BG)
