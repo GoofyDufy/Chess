@@ -590,6 +590,11 @@ class StatsTab(ctk.CTkFrame):
         tree._sort_state = (key, reverse)
 
     def refresh(self) -> None:
+        # nothing changed since last time (same filter, same data): keep what's shown
+        key = (self.filter_var.get(), self.page_switch.get() == "Repertoire", db.data_signature(self.conn))
+        if key == getattr(self, "_shown_key", None):
+            return
+        self._shown_key = key
         db.set_setting(self.conn, "stats_filter", self.filter_var.get())
         s = stats.compute(self.conn, FILTERS[self.filter_var.get()])
         self.summary_label.configure(

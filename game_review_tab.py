@@ -599,7 +599,7 @@ class GameReviewTab(ctk.CTkFrame):
         path = my_lines.db_path(self.conn)
 
         def worker():
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)   # its own connection
+            conn = sqlite3.connect(path, timeout=30)          # its own connection (saves what it finds)
             try:
                 self._amazing_queue.put(amazing.find_all(conn))
             except Exception:

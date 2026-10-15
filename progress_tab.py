@@ -25,6 +25,7 @@ class ProgressTab(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.conn = conn
         self.actions = actions or {}
+        self._shown: dict = {}             # view -> what it was last drawn from
         self._build()
         self.bind("<Map>", lambda e: self.after(50, self._refresh_view))
 
@@ -113,6 +114,11 @@ class ProgressTab(ctk.CTkFrame):
 
     def _refresh_view(self) -> None:
         view = self.view_var.get()
+        # nothing changed since this view was last drawn: keep it (it's slow to build)
+        key = (view, self.class_var.get(), self.goal_var.get(), db.data_signature(self.conn))
+        if key == self._shown.get(view):
+            return
+        self._shown[view] = key
         if view == THEMES:
             self.themes_view.refresh()
         elif view == WEEK:

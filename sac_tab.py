@@ -201,7 +201,7 @@ class SacTab(ctk.CTkFrame):
         path = my_lines.db_path(self.conn)
 
         def worker():
-            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            conn = sqlite3.connect(path, timeout=30)          # its own connection (saves what it finds)
             try:
                 found, missed = amazing.find_all(conn), amazing.find_missed(conn)
             except Exception:

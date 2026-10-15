@@ -176,6 +176,8 @@ def get_connection(path: Optional[Path] = None) -> sqlite3.Connection:
     opening_library.ensure_schema(conn)
     import my_lines                        # your games, matched to the library's named lines
     my_lines.ensure_schema(conn)
+    import amazing                         # amazing moves / missed sacrifices, searched once per game
+    amazing.ensure_schema(conn)
     import sac                             # Sacrifice!! rounds (Tactics & Threats)
     sac.ensure_schema(conn)
     _migrate(conn)
@@ -813,3 +815,15 @@ def set_line_enabled(conn: sqlite3.Connection, root_id: str, enabled: bool) -> N
         [(int(enabled), nid) for nid in ids_to_update],
     )
     conn.commit()
+
+
+def data_signature(conn: sqlite3.Connection) -> tuple:
+    """Cheap fingerprint of what the Stats / Progress pages are computed from
+    (games, analysis, puzzles, tries, repertoire): pages recompute only when
+    it changes, instead of on every visit."""
+    return tuple(conn.execute(
+        """SELECT (SELECT COUNT(*) FROM games), (SELECT MAX(rowid) FROM move_evaluations),
+                  (SELECT COUNT(*) FROM puzzles), (SELECT MAX(rowid) FROM attempts),
+                  (SELECT MAX(rowid) FROM spot_attempts), (SELECT MAX(rowid) FROM threat_attempts),
+                  (SELECT MAX(rowid) FROM sac_attempts), (SELECT COUNT(*) FROM opening_lines),
+                  (SELECT COUNT(*) FROM lichess_puzzles), (SELECT COUNT(*) FROM user_tags)""").fetchone())

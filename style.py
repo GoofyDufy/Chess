@@ -18,18 +18,17 @@ heuristic, good for trends over many games, not verdicts on single moves:
 
 from __future__ import annotations
 
-import io
+import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import chess
-import chess.pgn
 
 from analyzer import MATE_CP
 from models import in_time_filter
-from stats import BLUNDER_CP, MAX_LOSS_CP, PhaseStat, Record, opening_name
+from stats import BLUNDER_CP, MAX_LOSS_CP, PhaseStat, Record, opening_name, pgn_headers
 
 ONLY_MOVE_GAP_CP = 120        # best beats 2nd best by this much = only move
 PUNISH_CHANCE_CP = 200        # opponent's move handed you at least this much
@@ -62,13 +61,13 @@ def is_sharp(row: sqlite3.Row) -> bool:
 def pawn_structure(fen: str) -> str:
     """Closed = 3+ pawn pairs locked head-to-head; Open = at most one
     locked pair and 12 or fewer pawns left; otherwise Semi-open."""
-    board = chess.Board(fen)
-    white_pawns = board.pieces(chess.PAWN, chess.WHITE)
-    black_pawns = board.pieces(chess.PAWN, chess.BLACK)
-    locked = sum(1 for sq in white_pawns if sq + 8 < 64 and (sq + 8) in black_pawns)
+    ranks = fen.split(" ", 1)[0].split("/")              # rank 8 first
+    rows = [re.sub(r"\d", lambda m: "." * int(m.group()), r) for r in ranks]
+    locked = sum(1 for upper, lower in zip(rows, rows[1:])   # black pawn right in front of a white one
+                 for a, b in zip(upper, lower) if a == "p" and b == "P")
     if locked >= 3:
         return "Closed center"
-    if locked <= 1 and len(white_pawns) + len(black_pawns) <= 12:
+    if locked <= 1 and sum(r.count("p") + r.count("P") for r in rows) <= 12:
         return "Open center"
     return "Semi-open center"
 
@@ -105,7 +104,8 @@ def compute_style(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = N
             games[g["id"]] = g
 
     evals_by_game: Dict[str, List[sqlite3.Row]] = defaultdict(list)
-    for ev in conn.execute("SELECT * FROM move_evaluations ORDER BY game_id, ply"):
+    for ev in conn.execute("SELECT game_id, ply, fen_before, cp_before, cp_after, cp_second, move_uci, "
+                           "best_move_uci FROM move_evaluations ORDER BY game_id, ply"):
         if ev["game_id"] in games:
             evals_by_game[ev["game_id"]].append(ev)
 
@@ -150,9 +150,9 @@ def compute_style(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = N
             if game_id not in structure_of and ev["ply"] >= 28:
                 structure_of[game_id] = pawn_structure(ev["fen_before"])
             if game_id not in queens_of and ev["ply"] >= 40:
-                board = chess.Board(ev["fen_before"])
-                queens_of[game_id] = ("Queens kept past move 20" if board.pieces(chess.QUEEN, chess.WHITE)
-                                      or board.pieces(chess.QUEEN, chess.BLACK) else "Queens off by move 20")
+                placement = ev["fen_before"].split(" ", 1)[0]
+                queens_of[game_id] = ("Queens kept past move 20" if "q" in placement.lower()
+                                      else "Queens off by move 20")
         if total_mid >= 5:
             game_sharpness[game_id] = sharp_mid / total_mid
 
@@ -175,7 +175,7 @@ def compute_style(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = N
             types[structure_of[game_id]].add(g["result"])
         if game_id in queens_of:
             types[queens_of[game_id]].add(g["result"])
-        headers = chess.pgn.read_headers(io.StringIO(g["pgn"])) or chess.pgn.Headers()
+        headers = pgn_headers(g["pgn"])
         key = (opening_name(headers), g["my_color"])
         opening_records[key].add(g["result"])
         if game_id in game_sharpness:

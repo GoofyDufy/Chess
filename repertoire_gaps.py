@@ -19,7 +19,6 @@ you most often played there.
 
 from __future__ import annotations
 
-import io
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -27,10 +26,9 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import chess
-import chess.pgn
 
 from models import in_time_filter
-from stats import Record, opening_name
+from stats import Record, opening_name, pgn_headers
 
 MAX_PLY = 20            # only look at the first 10 moves
 COMMON_PLIES = 6        # "common lines" are grouped by the first 3 moves each
@@ -155,7 +153,7 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
         color = g["my_color"]
         my_turn = chess.WHITE if color == "white" else chess.BLACK
         positions, rep_moves = reps[color]
-        headers = chess.pgn.read_headers(io.StringIO(g["pgn"])) or chess.pgn.Headers()
+        headers = pgn_headers(g["pgn"])
         name = opening_name(headers)
 
         board = chess.Board()

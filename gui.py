@@ -40,6 +40,16 @@ from stats_tab import StatsTab
 SIDEBAR_WIDTH = 200
 
 
+class _LazyPages(dict):
+    """name -> page; a page not built yet is built (by its factory) when first asked for."""
+    factories: dict = {}
+
+    def __missing__(self, name):
+        page = self.factories[name]()
+        self[name] = page
+        return page
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -156,26 +166,25 @@ class App(ctk.CTk):
             self.pages["Puzzle Review"]._import_games()
 
     def _build_pages(self) -> None:
+        """Puzzle Review (the first page, which also runs the background puzzle
+        sorting) and Import & Analyze are built now; every other page the first
+        time it's opened or linked to — building them all up front took most of
+        the startup time."""
         content = self.content
-        self.pages = {}
         self.nav_buttons = {}
+        pages = self.pages = _LazyPages()
 
         def review_game(game_id, fen):
             self.show_page("Game Review")
-            review_tab.open_game(game_id, fen)
-
-        puzzle_tab = PuzzleReviewTab(content, self.conn, on_review_game=review_game)
-        review_tab = GameReviewTab(content, self.conn)
-        drill_tab = OpeningDrillTab(content, self.conn, on_review_game=review_game)
+            pages["Game Review"].open_game(game_id, fen)
 
         def drill_opening(opening):
             self.show_page("Opening Drill")
-            drill_tab.drill_suggestion(opening.name, opening.color, opening.moves)
+            pages["Opening Drill"].drill_suggestion(opening.name, opening.color, opening.moves)
 
-        stats_tab = StatsTab(content, self.conn, on_drill=drill_opening,
-                             on_repertoire_changed=drill_tab._refresh_repertoire_list,
-                             on_review_game=review_game)
-        trainer = TrainerPage(content, self.conn, on_review_game=review_game)
+        def repertoire_changed():
+            if "Opening Drill" in pages:                 # not built yet: it reads the lines when it is
+                pages["Opening Drill"]._refresh_repertoire_list()
 
         def go(page, then=None):
             self.show_page(page)
@@ -184,24 +193,30 @@ class App(ctk.CTk):
 
         def open_puzzle(puzzle_id):
             self.show_page("Puzzle Review")
-            puzzle_tab.open_puzzle(puzzle_id)
+            pages["Puzzle Review"].open_puzzle(puzzle_id)
 
-        progress_tab = ProgressTab(content, self.conn, actions={
-            "practice_theme": lambda tag: go("Puzzle Review", lambda: puzzle_tab.practice_theme(tag)),
-            "open_puzzle": open_puzzle,
-            "review_game": review_game,
-            "threats": lambda: go("Tactics & Threats", lambda: trainer.show_mode(THREAT)),
-            "tactics": lambda: go("Tactics & Threats", lambda: trainer.show_mode(TACTIC)),
-            "analyze": lambda: go("Import & Analyze"),
-        })
-        scout_tab = ScoutTab(content, self.conn)
+        puzzle_tab = PuzzleReviewTab(content, self.conn, on_review_game=review_game)
+        pages["Puzzle Review"] = puzzle_tab
+        pages["Import & Analyze"] = puzzle_tab.import_page
+        pages.factories = {
+            "Tactics & Threats": lambda: TrainerPage(content, self.conn, on_review_game=review_game),
+            "Game Review": lambda: GameReviewTab(content, self.conn),
+            "Opening Drill": lambda: OpeningDrillTab(content, self.conn, on_review_game=review_game),
+            "Stats": lambda: StatsTab(content, self.conn, on_drill=drill_opening,
+                                      on_repertoire_changed=repertoire_changed, on_review_game=review_game),
+            "Progress": lambda: ProgressTab(content, self.conn, actions={
+                "practice_theme": lambda tag: go("Puzzle Review", lambda: puzzle_tab.practice_theme(tag)),
+                "open_puzzle": open_puzzle,
+                "review_game": review_game,
+                "threats": lambda: go("Tactics & Threats", lambda: pages["Tactics & Threats"].show_mode(THREAT)),
+                "tactics": lambda: go("Tactics & Threats", lambda: pages["Tactics & Threats"].show_mode(TACTIC)),
+                "analyze": lambda: go("Import & Analyze"),
+            }),
+            "Opponent Prep": lambda: ScoutTab(content, self.conn),
+        }
 
-        for name, page in (("Import & Analyze", puzzle_tab.import_page),
-                           ("Puzzle Review", puzzle_tab), ("Tactics & Threats", trainer),
-                           ("Game Review", review_tab),
-                           ("Opening Drill", drill_tab), ("Stats", stats_tab),
-                           ("Progress", progress_tab), ("Opponent Prep", scout_tab)):
-            self.pages[name] = page
+        for name in ("Import & Analyze", "Puzzle Review", "Tactics & Threats", "Game Review",
+                     "Opening Drill", "Stats", "Progress", "Opponent Prep"):
             b = theme.button(self.nav_frame, name, command=lambda n=name: self.show_page(n),
                              kind="ghost", anchor="w", height=36)   # 8 fit above the level card at 768 px
             b.pack(fill="x", padx=12, pady=2)
@@ -210,11 +225,11 @@ class App(ctk.CTk):
         self.show_page("Puzzle Review")
 
     def show_page(self, name: str) -> None:
-        for page_name, page in self.pages.items():
-            if page_name == name:
-                page.pack(fill="both", expand=True)
-            else:
+        shown = self.pages[name]                         # built now if it's the first visit
+        for page in list(self.pages.values()):
+            if page is not shown:
                 page.pack_forget()
+        shown.pack(fill="both", expand=True)
         for button_name, b in self.nav_buttons.items():
             selected = button_name == name
             b.configure(fg_color=theme.CONTROL_BG if selected else "transparent",

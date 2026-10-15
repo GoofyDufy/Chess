@@ -306,6 +306,16 @@ weak spots, Tactics & Threats) and levels from Pawn I to King III, shown in the
 sidebar. Several players can share the app: each gets their own database
 (**+ New player** in the sidebar).
 
+## Speed
+
+- **Screens are built the first time you open them**, not at start-up. After
+  that, switching between screens is instant.
+- **Stats and Progress only recompute when your data changes**, for example
+  after new games, analysis or puzzle attempts.
+- **The scan for amazing moves and missed sacrifices is saved per game.** The
+  first scan takes a few seconds, and after that only new or re-analysed games
+  are scanned again.
+
 ## Tests
 
 ```

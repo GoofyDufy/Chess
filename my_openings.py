@@ -16,18 +16,16 @@ lines for the colour you had, matched by position (transpositions count):
 
 from __future__ import annotations
 
-import io
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
 import chess
-import chess.pgn
 
 from models import in_time_filter
 from repertoire_gaps import _opening_moves, format_line, position_key
-from stats import Record, opening_name
+from stats import Record, opening_name, pgn_headers
 
 MAX_PLY = 24             # the first 12 moves
 MIN_GAMES = 1
@@ -143,7 +141,7 @@ def compute(conn: sqlite3.Connection, time_classes: Optional[Set[str]] = None) -
         color = g["my_color"]
         mine = chess.WHITE if color == "white" else chess.BLACK
         rep_moves, rep_names = reps[color]
-        headers = chess.pgn.read_headers(io.StringIO(g["pgn"])) or chess.pgn.Headers()
+        headers = pgn_headers(g["pgn"])
         name = opening_name(headers)
         use = openings.setdefault((name, color), OpeningUse(name, color))
         use.record.add(g["result"])

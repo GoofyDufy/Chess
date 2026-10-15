@@ -175,7 +175,7 @@ def add_missed_sacrifices(conn) -> Tuple[int, int]:
     existing = {(r[0], r[1]): (r[2], r[3]) for r in conn.execute(
         "SELECT source_game_id, fen, id, puzzle_type FROM puzzles WHERE source_game_id IS NOT NULL")}
     relabel, new = [], {}
-    for m in amazing.find_missed(conn):
+    for m in amazing.find_missed(conn, cached=False):
         hit = existing.get((m.game_id, m.fen))
         if hit is not None:
             if hit[1] not in (MISSED_SACRIFICE, "Missed Mate"):

@@ -56,16 +56,28 @@ class Amazing:
 
 
 def _best_capture(board: chess.Board, me: chess.Color) -> int:
-    """What the side to move could win from `me` right now (one capture, defended or not)."""
+    """What the side to move could win from `me` right now (one capture, defended or not).
+    Only your pieces under attack are looked at, and only those captures checked for
+    legality — not every legal move in the position (this runs for ~40,000 positions)."""
     best = 0
-    for m in board.legal_moves:
-        if not board.is_capture(m) or board.is_en_passant(m):
+    them = board.turn
+    for square in chess.SquareSet(board.occupied_co[me]):
+        victim = board.piece_at(square)
+        if victim is None or victim.piece_type == chess.KING:
             continue
-        victim, attacker = board.piece_at(m.to_square), board.piece_at(m.from_square)
-        if victim is None or attacker is None or victim.color != me:
-            continue
-        gain = VALUES[victim.piece_type] - (VALUES[attacker.piece_type] if board.is_attacked_by(me, m.to_square) else 0)
-        best = max(best, gain)
+        value = VALUES[victim.piece_type]
+        if value <= best:
+            continue                                   # can't beat what's already found
+        defended = board.is_attacked_by(me, square)
+        for attacker_sq in board.attackers(them, square):
+            attacker = board.piece_at(attacker_sq)
+            move = chess.Move(attacker_sq, square)
+            if attacker.piece_type == chess.PAWN and chess.square_rank(square) in (0, 7):
+                move.promotion = chess.QUEEN
+            if not board.is_legal(move):
+                continue
+            gain = value - (VALUES[attacker.piece_type] if defended else 0)
+            best = max(best, gain)
     return best
 
 
@@ -97,8 +109,8 @@ def is_amazing(fen: str, move_uci: str, cp_before: Optional[int], cp_after: Opti
     return size if size >= MIN_OFFER else 0
 
 
-def find_all(conn: sqlite3.Connection) -> List[Amazing]:
-    """Every amazing move in your analyzed games, newest games first."""
+def _find_all_direct(conn: sqlite3.Connection) -> List[Amazing]:
+    """Every amazing move in your analyzed games, newest games first (no cache)."""
     out = []
     for r in conn.execute(
             """SELECT e.game_id, e.ply, e.fen_before, e.move_uci, e.cp_before, e.cp_after FROM move_evaluations e
@@ -141,8 +153,8 @@ def missed_sacrifice(fen: str, played_uci: str, best_uci: Optional[str], cp_befo
     return size if size >= MIN_OFFER else 0
 
 
-def find_missed(conn: sqlite3.Connection) -> List[Missed]:
-    """Every sound sacrifice you missed in your analyzed games, newest games first."""
+def _find_missed_direct(conn: sqlite3.Connection) -> List[Missed]:
+    """Every sound sacrifice you missed in your analyzed games, newest games first (no cache)."""
     out = []
     for r in conn.execute(
             """SELECT e.game_id, e.ply, e.fen_before, e.move_uci, e.best_move_uci, e.cp_before, e.cp_after
@@ -156,6 +168,94 @@ def find_missed(conn: sqlite3.Connection) -> List[Missed]:
             out.append(Missed(r[0], r[1], r[2], r[4], board.san(chess.Move.from_uci(r[4])),
                               board.san(chess.Move.from_uci(r[3])), size, r[5], r[6]))
     return out
+
+
+# ---------- saved results (a game's analysis never changes: each game is searched once) ----------
+
+CACHE_VERSION = 1          # bump when the rules above change: every game is searched again
+SCAN_YIELD_EVERY = 300     # positions between short pauses (lets the window breathe meanwhile)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sac_scanned (
+    game_id TEXT PRIMARY KEY,
+    version INTEGER,
+    evals INTEGER              -- how many analyzed moves it had (re-analyzed: searched again)
+);
+CREATE TABLE IF NOT EXISTS sac_found (
+    game_id TEXT,
+    ply INTEGER,
+    kind TEXT,                 -- "amazing" / "missed"
+    data TEXT                  -- the Amazing / Missed, as JSON
+);
+CREATE INDEX IF NOT EXISTS idx_sac_found_game ON sac_found (game_id);
+"""
+
+
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
+
+
+def _to_scan(conn: sqlite3.Connection) -> List[str]:
+    done = {r[0]: r[1] for r in conn.execute("SELECT game_id, evals FROM sac_scanned WHERE version = ?",
+                                             (CACHE_VERSION,))}
+    return [gid for gid, n in conn.execute("SELECT game_id, COUNT(*) FROM move_evaluations GROUP BY game_id")
+            if done.get(gid) != n]
+
+
+def _scan(conn: sqlite3.Connection, game_ids: List[str]) -> None:
+    """Search these games and save what's found (works from a background thread's own connection)."""
+    import json
+    import time
+    from dataclasses import asdict
+    for i in range(0, len(game_ids), 200):
+        chunk = game_ids[i:i + 200]
+        marks = ",".join("?" * len(chunk))
+        found, counts, seen = [], {}, 0
+        for r in conn.execute(
+                f"""SELECT game_id, ply, fen_before, move_uci, best_move_uci, cp_before, cp_after
+                    FROM move_evaluations WHERE game_id IN ({marks})""", chunk):
+            gid, ply, fen, uci, best, before, after = r
+            counts[gid] = counts.get(gid, 0) + 1
+            seen += 1
+            if seen % SCAN_YIELD_EVERY == 0:
+                time.sleep(0.002)                   # a breath for the window (one Python thread at a time)
+            if after is None:
+                continue
+            size = is_amazing(fen, uci, before, after)
+            if size:
+                san = chess.Board(fen).san(chess.Move.from_uci(uci))
+                found.append((gid, ply, "amazing", json.dumps(asdict(Amazing(gid, ply, san, size, before, after, fen, uci)))))
+            size = missed_sacrifice(fen, uci, best, before, after)
+            if size:
+                board = chess.Board(fen)
+                m = Missed(gid, ply, fen, best, board.san(chess.Move.from_uci(best)),
+                           board.san(chess.Move.from_uci(uci)), size, before, after)
+                found.append((gid, ply, "missed", json.dumps(asdict(m))))
+        with conn:
+            conn.execute(f"DELETE FROM sac_found WHERE game_id IN ({marks})", chunk)
+            conn.executemany("INSERT INTO sac_found (game_id, ply, kind, data) VALUES (?, ?, ?, ?)", found)
+            conn.executemany("INSERT OR REPLACE INTO sac_scanned (game_id, version, evals) VALUES (?, ?, ?)",
+                             [(g, CACHE_VERSION, counts.get(g, 0)) for g in chunk])
+
+
+def _cached(conn: sqlite3.Connection, kind: str, cls):
+    import json
+    _scan(conn, _to_scan(conn))                     # only games not searched yet (or re-analyzed)
+    return [cls(**json.loads(r[0])) for r in conn.execute(
+        """SELECT f.data FROM sac_found f JOIN games g ON g.id = f.game_id WHERE f.kind = ?
+           ORDER BY g.played_at DESC, f.ply""", (kind,))]
+
+
+def find_all(conn: sqlite3.Connection) -> List[Amazing]:
+    """Every amazing move in your analyzed games, newest games first — from the saved
+    search (new games are searched first). Needs a connection that can write."""
+    return _cached(conn, "amazing", Amazing)
+
+
+def find_missed(conn: sqlite3.Connection, cached: bool = True) -> List[Missed]:
+    """Every sound sacrifice you missed, newest games first (see find_all).
+    cached=False: search directly, saving nothing (the one-off puzzle backfill)."""
+    return _cached(conn, "missed", Missed) if cached else _find_missed_direct(conn)
 
 
 # ---------- accuracy ----------
