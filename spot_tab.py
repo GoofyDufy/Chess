@@ -19,7 +19,7 @@ import chess.engine
 import customtkinter as ctk
 
 import db
-import engine_locator
+import engine_service
 import progression
 import spot
 import theme
@@ -495,49 +495,40 @@ class SpotTab(ctk.CTkFrame):
     def _start_engine(self) -> None:
         if self._engine_started:
             return
-        path = engine_locator.find_stockfish()
-        if path is None:
+        if not engine_service.available():
             self.status_label.configure(text="Stockfish not found — see Import & Analyze for setup help.",
                                         text_color=theme.ERROR)
             return
         self._engine_started = True
-        threading.Thread(target=self._engine_loop, args=(path,), daemon=True).start()
+        threading.Thread(target=self._engine_loop, daemon=True).start()
 
-    def _engine_loop(self, path: str) -> None:
-        try:
-            engine = chess.engine.SimpleEngine.popen_uci(path)
-        except Exception as e:
-            self._results.put(("error", str(e)))
-            return
-        try:
-            while True:
-                job = self._jobs.get()
-                if job is None:
-                    break
-                if job[0] == "classify":
-                    _, cand, previous, captured, quiet, tries = job
-                    board = chess.Board(cand.fen)
-                    verdict, trivial = None, True
-                    if not board.is_game_over():
-                        verdict = spot.classify(engine, board, captured)
-                        trivial = spot.is_trivial(board, verdict.best, previous, captured)
-                    self._results.put(("classified", cand, verdict, trivial, quiet, tries))
-                elif job[0] == "line":
-                    _, token, fen, verdict = job
-                    line = spot.correct_line(engine, chess.Board(fen), verdict)
-                    self._results.put(("line", token, line, None))
-                    self._results.put(("line", token, line, spot.line_evals(engine, chess.Board(fen), line)))
-                else:
-                    _, token, fen, verdict, move = job
-                    good, loss = spot.judge_move(engine, chess.Board(fen), verdict, move)
-                    self._results.put(("judged", token, move, good, loss))
-        except Exception as e:
-            self._results.put(("error", str(e)))
-        finally:
+    def _engine_loop(self) -> None:
+        """Jobs from the UI, one at a time, on the app's shared Stockfish (engine_service.py)."""
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                break
             try:
-                engine.quit()
-            except Exception:
-                pass
+                with engine_service.borrow() as engine:
+                    if job[0] == "classify":
+                        _, cand, previous, captured, quiet, tries = job
+                        board = chess.Board(cand.fen)
+                        verdict, trivial = None, True
+                        if not board.is_game_over():
+                            verdict = spot.classify(engine, board, captured)
+                            trivial = spot.is_trivial(board, verdict.best, previous, captured)
+                        self._results.put(("classified", cand, verdict, trivial, quiet, tries))
+                    elif job[0] == "line":
+                        _, token, fen, verdict = job
+                        line = spot.correct_line(engine, chess.Board(fen), verdict)
+                        self._results.put(("line", token, line, None))
+                        self._results.put(("line", token, line, spot.line_evals(engine, chess.Board(fen), line)))
+                    else:
+                        _, token, fen, verdict, move = job
+                        good, loss = spot.judge_move(engine, chess.Board(fen), verdict, move)
+                        self._results.put(("judged", token, move, good, loss))
+            except Exception as e:
+                self._results.put(("error", str(e)))
 
     def _poll(self) -> None:
         if not self.winfo_exists():

@@ -2,7 +2,7 @@
 Opening Drill): its top moves with their evaluations and lines, a quick
 answer first and a deeper one after.
 
-One Stockfish on a background thread (the app-wide rule, see puzzle_tab.py):
+The app's shared Stockfish (engine_service.py), from a background thread:
 analyse() queues a position — only the newest one is worked on, so clicking
 through a line never builds a backlog — and results come back to the UI
 thread through an after() poller as on_result(fen, depth, lines).
@@ -18,7 +18,7 @@ from typing import Callable, List, Optional
 import chess
 import chess.engine
 
-import engine_locator
+import engine_service
 from analyzer import MATE_CP
 
 LINES = 3                  # top moves shown
@@ -68,13 +68,12 @@ class IdeasEngine:
 
     def analyse(self, fen: str) -> None:
         if not self._started:
-            path = engine_locator.find_stockfish()
-            if path is None:
+            if not engine_service.available():
                 if self.on_error:
                     self.on_error("Stockfish not found — see Import & Analyze for setup help.")
                 return
             self._started = True
-            threading.Thread(target=self._loop, args=(path,), daemon=True).start()
+            threading.Thread(target=self._loop, daemon=True).start()
             self.widget.after(POLL_MS, self._poll)
         self._jobs.put(fen)
 
@@ -90,33 +89,24 @@ class IdeasEngine:
             except queue.Empty:
                 return job
 
-    def _loop(self, path: str) -> None:
-        try:
-            engine = chess.engine.SimpleEngine.popen_uci(path)
-        except Exception as e:
-            self._results.put(("error", str(e)))
-            return
-        try:
-            while True:
-                fen = self._newest_job(block=True)
-                if fen is None:
-                    break
-                board = chess.Board(fen)
-                if board.is_game_over():
-                    self._results.put(("ideas", fen, 0, []))
-                    continue
+    def _loop(self) -> None:
+        while True:
+            fen = self._newest_job(block=True)
+            if fen is None:
+                break
+            board = chess.Board(fen)
+            if board.is_game_over():
+                self._results.put(("ideas", fen, 0, []))
+                continue
+            try:
                 for depth in (QUICK_DEPTH, DEEP_DEPTH):
                     if not self._jobs.empty():
                         break            # moved on already
-                    infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=LINES)
+                    with engine_service.borrow() as engine:
+                        infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=LINES)
                     self._results.put(("ideas", fen, depth, [self._idea(i) for i in infos if i.get("pv")]))
-        except Exception as e:
-            self._results.put(("error", str(e)))
-        finally:
-            try:
-                engine.quit()
-            except Exception:
-                pass
+            except Exception as e:
+                self._results.put(("error", str(e)))
 
     @staticmethod
     def _idea(info) -> Idea:

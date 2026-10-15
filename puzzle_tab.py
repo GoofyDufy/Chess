@@ -25,8 +25,8 @@ import db
 import chess.engine
 
 import engine_locator
+import engine_service
 import explain
-import engine_ideas
 import explorer
 import lichess_puzzles
 import progression
@@ -39,9 +39,9 @@ import style
 import theme
 from play_window import PlayWindow
 from eval_bar import EvalBar
+from analysis_board import Analysis, IdeasPanel
 from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
 
-IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move
 from models import TIME_FILTERS, Game, Puzzle, PuzzleSource
 
 TYPE_COLORS = {
@@ -268,34 +268,10 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self.status_label.pack(pady=(10, 0), anchor="w")
         self.explanation_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
         self.explanation_label.pack(pady=(2, 0), anchor="w")
-        # self-analysis: Stockfish's top lines, a row each, dot in its arrow's colour
-        self.ideas_frame = ctk.CTkFrame(board_pad, fg_color="transparent")
-        title_row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent")
-        title_row.pack(anchor="w", fill="x")
-        self.ideas_title = theme.label(title_row, "", "status", height=20)
-        self.ideas_title.pack(side="left")
-        self.ideas_header = theme.label(title_row, "", "muted", height=20)
-        self.ideas_header.pack(side="left", padx=(10, 0))
-        self._idea_rows = []
-        for i, rank in enumerate(("Best", "2nd", "3rd")):
-            row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
-            dot = ctk.CTkLabel(row, text=f"● {rank}", width=46, height=20, anchor="w", font=theme.FONT_BOLD,
-                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
-            dot.pack(side="left")
-            text = theme.label(row, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2", height=20)
-            text.pack(side="left", fill="x")
-            for widget in (row, dot, text):
-                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
-            self._idea_rows.append((row, text))
-        self._analysis = False
-        self._ana_board: Optional[chess.Board] = None
-        self._ana_start = 0                      # moves on the analysis board you can't take back
-        self._ana_ahead: List[chess.Move] = []   # rest of a Stockfish line being followed
-        self._ana_fen: Optional[str] = None
-        self._ana_title = ""
-        self._ideas: list = []
-        self._ideas_engine = engine_ideas.IdeasEngine(self, self._on_ideas, self._on_ideas_error)
-        self.bind("<Destroy>", lambda e: self._ideas_engine.stop(), add="+")
+        # self-analysis after a puzzle, from its start: Stockfish's top lines (analysis_board.py)
+        self.ideas_frame = IdeasPanel(board_pad, lambda i: self.analysis.follow(i), header_beside=True)
+        self.analysis = Analysis(self, self.board_widget, self.ideas_frame, self.eval_bar,
+                                 title=self._analysis_title)
 
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
@@ -984,8 +960,8 @@ class PuzzleReviewTab(ctk.CTkFrame):
     # ---------- Attempting a puzzle ----------
 
     def _on_move_attempt(self, move: chess.Move) -> None:
-        if self._analysis:
-            self._analysis_move(move)
+        if self.analysis.active:
+            self.analysis.play(move)
             return
         if self.current_puzzle is None or self.attempt_state != "solving":
             return
@@ -1076,25 +1052,16 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         def worker():
             line: List[chess.Move] = []
-            engine = None
             try:
-                path = engine_locator.find_stockfish()
-                if path:
-                    engine = chess.engine.SimpleEngine.popen_uci(path)
-                    board = chess.Board(fen)
-                    for move in start:
-                        board.push(move)
-                    if not board.is_game_over():
+                board = chess.Board(fen)
+                for move in start:
+                    board.push(move)
+                if not board.is_game_over():
+                    with engine_service.borrow() as engine:
                         info = engine.analyse(board, chess.engine.Limit(depth=MAIN_LINE_DEPTH))
-                        line = list(info.get("pv", []))[:MAIN_LINE_PLIES]
+                    line = list(info.get("pv", []))[:MAIN_LINE_PLIES]
             except Exception:
                 line = []
-            finally:
-                if engine is not None:
-                    try:
-                        engine.quit()
-                    except Exception:
-                        pass
 
             def apply():
                 if self._line_token is token and line:
@@ -1104,106 +1071,39 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ---------- self-analysis after a puzzle (engine_ideas.py) ----------
+    # ---------- self-analysis after a puzzle (analysis_board.py) ----------
 
     def _toggle_analysis(self) -> None:
-        if self._analysis:
+        if self.analysis.active:
             self._stop_analysis()
             self._step_line(0)                  # back to the solution view
             return
         if self.current_puzzle is None or self.attempt_state != "done":
             return
-        self._analysis = True
-        self._ana_board = chess.Board(self.current_puzzle.fen)   # from the puzzle's start
-        self._ana_start = len(self._ana_board.move_stack)
-        self._ana_ahead = list(self._main_line)                  # ▶ walks the solution; any move branches off
         self.study_button.configure(text="Stop analysis", width=120)
         for b in (self.line_back_button, self.line_fwd_button):
             b.configure(state="normal")
         self.explanation_label.pack_forget()
         self.ideas_frame.pack(after=self.status_label, anchor="w", fill="x", pady=(10, 0))
         self.status_label.pack_forget()
-        self._show_analysis_board()
+        # from the puzzle's start: ▶ walks the solution, any move branches off
+        self.analysis.start(chess.Board(self.current_puzzle.fen), ahead=self._main_line)
 
     def _stop_analysis(self) -> None:
-        if not self._analysis:
+        if not self.analysis.active:
             return
-        self._analysis = False
-        self._ana_fen = None
+        self.analysis.stop()
         self.study_button.configure(text="Analyze", width=84)
         self.status_label.pack(before=self.ideas_frame, pady=(10, 0), anchor="w")
         self.ideas_frame.pack_forget()
         if not self.explanation_label.winfo_manager():
             self.explanation_label.pack(after=self.status_label, pady=(2, 0), anchor="w")
 
-    def _show_analysis_board(self) -> None:
-        board = self._ana_board
-        self.board_widget.show_board(board.copy())
-        made = len(board.move_stack) - self._ana_start
+    @staticmethod
+    def _analysis_title(board: chess.Board) -> str:
+        made = len(board.move_stack)
         side = "White" if board.turn == chess.WHITE else "Black"
-        self._ana_title = f"{side} to move" + (f" ({made} move{'s' if made != 1 else ''} in)" if made else "")
-        self._ana_fen = board.fen()
-        self._show_ideas("Stockfish is thinking…", [])
-        self.board_widget.set_marked_arrows([])
-        if board.is_game_over():
-            outcome = board.outcome()
-            self._show_ideas("Game over: " + ("draw" if outcome.winner is None else
-                             ("White" if outcome.winner else "Black") + " wins") + ".", [])
-            return
-        self._ideas_engine.analyse(self._ana_fen)
-
-    def _analysis_move(self, move: chess.Move) -> None:
-        if move not in self._ana_board.legal_moves:
-            return
-        self._ana_ahead = self._ana_ahead[1:] if self._ana_ahead and self._ana_ahead[0] == move else []
-        self._ana_board.push(move)
-        self._show_analysis_board()
-
-    def _analysis_step(self, delta: int) -> None:
-        board = self._ana_board
-        if delta < 0:
-            if len(board.move_stack) > self._ana_start:
-                self._ana_ahead.insert(0, board.pop())     # ▶ plays it again
-                self._show_analysis_board()
-            return
-        if delta > 0:
-            move = self._ana_ahead[0] if self._ana_ahead else (self._ideas[0].move if self._ideas else None)
-            if move is not None and move in board.legal_moves:
-                self._analysis_move(move)
-
-    def _follow_idea(self, i: int) -> None:
-        """A Stockfish line clicked: play its first move; ▶ plays on along it."""
-        if not self._analysis or i >= len(self._ideas):
-            return
-        pv = list(self._ideas[i].pv)
-        self._analysis_move(pv[0])
-        self._ana_ahead = pv[1:]
-
-    def _on_ideas(self, fen: str, depth: int, ideas) -> None:
-        if not self._analysis or fen != self._ana_fen:
-            return                                     # moved on / stopped
-        self._ideas = ideas
-        board = chess.Board(fen)
-        if not ideas:
-            return
-        self._show_ideas(f"Stockfish depth {depth} · click a line, then ▶",
-                         [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
-        self.board_widget.set_marked_arrows(
-            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
-        self.eval_bar.set(ideas[0].cp_white, flipped=self.board_widget.flipped)
-
-    def _on_ideas_error(self, message: str) -> None:
-        self._show_ideas(message, [])
-
-    def _show_ideas(self, header: str, rows) -> None:
-        self.ideas_title.configure(text=f"Analysis — {self._ana_title}")
-        self.ideas_header.configure(text=header)
-        for i, (row, text) in enumerate(self._idea_rows):
-            if i < len(rows):
-                text.configure(text=rows[i])
-                row.pack(anchor="w", fill="x")
-            else:
-                row.pack_forget()
+        return f"{side} to move" + (f" ({made} move{'s' if made != 1 else ''} in)" if made else "")
 
     def _hide_main_line(self) -> None:
         self._line_token = None
@@ -1214,15 +1114,15 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._stop_analysis()
 
     def _update_line_buttons(self) -> None:
-        if self._analysis:
+        if self.analysis.active:
             return                               # ◀ ▶ step the analysis board then
         self.line_back_button.configure(state="normal" if self._line_index > 0 else "disabled")
         self.line_fwd_button.configure(
             state="normal" if self._line_index < len(self._main_line) else "disabled")
 
     def _step_line(self, delta: int) -> None:
-        if self._analysis:
-            self._analysis_step(delta)
+        if self.analysis.active:
+            self.analysis.step(delta)
             return
         if self.current_puzzle is None or self.attempt_state != "done" or not self._main_line:
             return
@@ -1250,20 +1150,14 @@ class PuzzleReviewTab(ctk.CTkFrame):
         self._explain_token = token
 
         def worker():
-            engine = None
             try:
-                path = engine_locator.find_stockfish()
-                if path:
-                    engine = chess.engine.SimpleEngine.popen_uci(path)
-                text = job(engine)
+                if engine_service.available():
+                    with engine_service.borrow() as engine:
+                        text = job(engine)
+                else:
+                    text = job(None)
             except Exception:
                 text = None
-            finally:
-                if engine is not None:
-                    try:
-                        engine.quit()
-                    except Exception:
-                        pass
 
             def apply():
                 if self._explain_token is not token or not text:
@@ -1440,21 +1334,14 @@ class PuzzleReviewTab(ctk.CTkFrame):
 
         def worker():
             solution = [best]
-            engine, result = None, None
+            result = None
             try:
-                path = engine_locator.find_stockfish()
-                if path:
-                    engine = chess.engine.SimpleEngine.popen_uci(path)
-                    result = puzzle_kind.classify(engine, p.fen, p.correct_move_uci)
+                if engine_service.available():
+                    with engine_service.borrow() as engine:
+                        result = puzzle_kind.classify(engine, p.fen, p.correct_move_uci)
                     solution = result.solution
             except Exception:
                 solution = [best]
-            finally:
-                if engine is not None:
-                    try:
-                        engine.quit()
-                    except Exception:
-                        pass
 
             def apply():
                 if result is not None:               # save it: next time it's instant, and filterable

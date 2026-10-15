@@ -9,7 +9,7 @@ your point of view.
 Analyze turns the board into a live analysis board from the move shown:
 move either side, ◀ takes back (to the start of the game), ▶ plays on
 along the game's moves (or a Stockfish line you clicked), with Stockfish's
-top 3 lines as arrows (engine_ideas.py, a background thread).
+top 3 lines as arrows (analysis_board.py, Stockfish on a background thread).
 """
 
 from __future__ import annotations
@@ -27,13 +27,13 @@ import customtkinter as ctk
 
 import amazing
 import db
-import engine_ideas
 import my_lines
 import my_openings
 import opening_library
 import theme
 from analyzer import MATE_CP, MIN_CHANCES_LOST, win_chances
-from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
+from analysis_board import Analysis, IdeasPanel
+from board_widget import BOARD_PIXELS, REPLY_COLOR, ChessBoardWidget
 from eval_bar import EvalBar
 from models import TIME_FILTERS, PlayerColor, in_time_filter, time_class
 from repertoire_gaps import position_key
@@ -42,7 +42,6 @@ GRAPH_W, GRAPH_H = 380, 130
 GRAPH_CLAMP = 600          # graph shows evals within +/-6 pawns
 MARKS = [(300, "??", "Blunder", theme.ERROR), (150, "?", "Mistake", theme.WARNING),
          (80, "?!", "Inaccuracy", theme.INFO)]
-IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move
 # move badges on the board and colours in the moves list (one meaning per colour on this page:
 # red / amber / blue are mistakes, so leaving your prep is purple, whoever did it)
 AMAZING_COLOR = "#F472B6"  # !! an amazing move: a sound sacrifice (amazing.py)
@@ -93,16 +92,8 @@ class GameReviewTab(ctk.CTkFrame):
         self._amazing_all: Optional[list] = None              # every amazing move of yours (the list)
         self._amazing_queue: "queue.Queue" = queue.Queue()
         self._library_positions = None                        # for naming a game's line (loaded once)
-        # analysis mode (Analyze): a board of its own, from the move shown
-        self._analysis = False
-        self._ana_board: Optional[chess.Board] = None
-        self._ana_ahead: List[chess.Move] = []     # ▶ plays these: the game's moves, or a Stockfish line
         self._ana_from_ply = 0                     # where Analyze was pressed (Back to game returns there)
-        self._ana_fen: Optional[str] = None
-        self._ideas: list = []
         self._build()
-        self._ideas_engine = engine_ideas.IdeasEngine(self, self._on_ideas, self._on_ideas_error)
-        self.bind("<Destroy>", lambda e: self._ideas_engine.stop(), add="+")
         self.bind("<Map>", lambda e: self._refresh_games() if not self.game_rows else None)
         top = self.winfo_toplevel()
         top.bind("<Left>", lambda e: self._key(-1), add="+")
@@ -130,26 +121,12 @@ class GameReviewTab(ctk.CTkFrame):
         self.status_label.pack(anchor="w", pady=(12, 0))
         self.detail_label = theme.label(pad, "", "body", wraplength=BOARD_PIXELS)
         self.detail_label.pack(anchor="w", pady=(2, 0))
-        # analysis: Stockfish's top lines, a row each, its dot in its arrow's colour (shown while analysing)
-        self.ideas_frame = ctk.CTkFrame(pad, fg_color="transparent")
-        title_row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent")
-        title_row.pack(anchor="w", fill="x")
-        self.ideas_title = theme.label(title_row, "", "status", height=20)
-        self.ideas_title.pack(side="left")
-        # its own line: beside the title it would widen the card past the board
-        self.ideas_header = theme.label(self.ideas_frame, "", "muted", height=18)
-        self.ideas_header.pack(anchor="w")
-        self._idea_rows = []
-        for i, rank in enumerate(("Best", "2nd", "3rd")):
-            row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
-            dot = ctk.CTkLabel(row, text=f"● {rank}", width=46, height=20, anchor="w", font=theme.FONT_BOLD,
-                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
-            dot.pack(side="left")
-            text = theme.label(row, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2", height=20)
-            text.pack(side="left", fill="x")
-            for widget in (row, dot, text):
-                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
-            self._idea_rows.append((row, text))
+        # analysis mode (Analyze, analysis_board.py): a board of its own from the move shown,
+        # Stockfish's top lines a row each (shown while analysing)
+        self.ideas_frame = IdeasPanel(pad, lambda i: self.analysis.follow(i))
+        self.analysis = Analysis(self, self.board_widget, self.ideas_frame, self.eval_bar,
+                                 flipped=lambda: self.my_color == chess.BLACK, title=self._analysis_title,
+                                 hint="click a line, then →", on_shown=self._on_analysis_shown)
         nav = ctk.CTkFrame(pad, fg_color="transparent")
         nav.pack(fill="x", pady=(12, 0))
         self._nav_frame = nav
@@ -345,18 +322,15 @@ class GameReviewTab(ctk.CTkFrame):
 
     def _step(self, step: int) -> None:
         """⏮ ← → ⏭ (and the arrow keys): along the game, or the analysis board when analysing."""
-        if self._analysis:
-            for _ in range(min(abs(step), 999)):
-                if not self._analysis_step(1 if step > 0 else -1):
-                    break
-            self._show_analysis_board()
+        if self.analysis.active:
+            self.analysis.walk(step)
             return
         self._go(self.ply + step)
 
     def _go(self, ply: int) -> None:
         if not self.moves:
             return
-        if self._analysis:                   # a move or graph click: back to the game, there
+        if self.analysis.active:             # a move or graph click: back to the game, there
             self._stop_analysis()
         self.ply = max(0, min(len(self.moves), ply))
         board = chess.Board()
@@ -459,124 +433,57 @@ class GameReviewTab(ctk.CTkFrame):
         """A move played on the board: in analysis, for either side; otherwise it starts analysis there."""
         if not self.moves:
             return
-        if not self._analysis:
+        if not self.analysis.active:
             self._start_analysis()
-        if move not in self._ana_board.legal_moves:
-            return
-        self._ana_ahead = self._ana_ahead[1:] if self._ana_ahead and self._ana_ahead[0] == move else []
-        self._ana_board.push(move)
-        self._show_analysis_board()
+        self.analysis.play(move)
 
     def _toggle_analysis(self) -> None:
-        if self._analysis:
+        if self.analysis.active:
             ply = self._ana_from_ply
             self._stop_analysis()
             self._go(ply)
         elif self.moves:
             self._start_analysis()
-            self._show_analysis_board()
 
     def _start_analysis(self) -> None:
-        self._analysis = True
+        """The analysis board from the move shown; ▶ plays on along the game."""
         self._ana_from_ply = self.ply
-        self._ana_board = chess.Board()
-        for move in self.moves[:self.ply]:
-            self._ana_board.push(move)
-        self._ana_ahead = list(self.moves[self.ply:])        # ▶ plays on along the game
         self.analyze_button.configure(text="Back to game", width=112)
         self.mistake_button.pack_forget()
         self.status_label.pack_forget()
         self.detail_label.pack_forget()
         self.ideas_frame.pack(before=self._nav_frame, anchor="w", fill="x", pady=(12, 0))
+        board = chess.Board()
+        for move in self.moves[:self.ply]:
+            board.push(move)
+        self.analysis.start(board, ahead=self.moves[self.ply:])
 
     def _stop_analysis(self) -> None:
-        if not self._analysis:
+        if not self.analysis.active:
             return
-        self._analysis = False
-        self._ana_fen = None
-        self._ideas = []
+        self.analysis.stop()
         self.analyze_button.configure(text="Analyze", width=84)
         self.mistake_button.pack(side="right")
         self.ideas_frame.pack_forget()
         self.status_label.pack(before=self._nav_frame, anchor="w", pady=(12, 0))
         self.detail_label.pack(before=self._nav_frame, anchor="w", pady=(2, 0))
 
-    def _on_game_line(self) -> bool:
-        stack = self._ana_board.move_stack
+    def _on_game_line(self, board: chess.Board) -> bool:
+        stack = board.move_stack
         return stack == self.moves[:len(stack)]
 
-    def _analysis_step(self, delta: int) -> bool:
-        board = self._ana_board
-        if delta < 0:
-            if not board.move_stack:
-                return False
-            self._ana_ahead.insert(0, board.pop())
-            return True
-        move = self._ana_ahead[0] if self._ana_ahead else (self._ideas[0].move if self._ideas else None)
-        if move is None or move not in board.legal_moves:
-            return False
-        self._ana_ahead = self._ana_ahead[1:] if self._ana_ahead else []
-        board.push(move)
-        if not self._ana_ahead:
-            self._ideas = []               # a new position: wait for fresh ideas before ▶ follows them
-        return True
-
-    def _follow_idea(self, i: int) -> None:
-        """A Stockfish line clicked: play its first move; ▶ plays on along it."""
-        if not self._analysis or i >= len(self._ideas):
-            return
-        pv = list(self._ideas[i].pv)
-        self._ana_board.push(pv[0])
-        self._ana_ahead = pv[1:]
-        self._show_analysis_board()
-
-    def _show_analysis_board(self) -> None:
-        board = self._ana_board
-        self.board_widget.show_board(board.copy(), flipped=self.my_color == chess.BLACK)
+    def _analysis_title(self, board: chess.Board) -> str:
         ply = len(board.move_stack)
         side = "White" if board.turn == chess.WHITE else "Black"
         where = f"move {ply // 2 + 1}" if ply else "start"
-        self._ana_title = (f"{side} to move · game, {where}" if self._on_game_line()
-                           else f"{side} to move · your line")
-        self._ana_fen = board.fen()
-        self._show_ideas("Stockfish is thinking…", [])
-        self.board_widget.set_marked_arrows([])
-        if self._on_game_line() and 0 < ply <= len(self.moves):
+        return f"{side} to move · game, {where}" if self._on_game_line(board) else f"{side} to move · your line"
+
+    def _on_analysis_shown(self, board: chess.Board) -> None:
+        ply = len(board.move_stack)
+        if self._on_game_line(board) and 0 < ply <= len(self.moves):
             self.moves_list.selection_clear(0, tk.END)
             self.moves_list.selection_set(ply - 1)
             self.moves_list.see(ply - 1)
-        if board.is_game_over():
-            outcome = board.outcome()
-            self._show_ideas("Game over: " + ("draw" if outcome.winner is None else
-                             ("White" if outcome.winner else "Black") + " wins") + ".", [])
-            return
-        self._ideas_engine.analyse(self._ana_fen)
-
-    def _on_ideas(self, fen: str, depth: int, ideas) -> None:
-        if not self._analysis or fen != self._ana_fen:
-            return                                     # moved on / stopped
-        self._ideas = ideas
-        if not ideas:
-            return
-        board = chess.Board(fen)
-        self._show_ideas(f"Stockfish depth {depth} · click a line, then →",
-                         [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
-        self.board_widget.set_marked_arrows(
-            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
-        self.eval_bar.set(ideas[0].cp_white, flipped=self.my_color == chess.BLACK)
-
-    def _on_ideas_error(self, message: str) -> None:
-        self._show_ideas(message, [])
-
-    def _show_ideas(self, header: str, rows) -> None:
-        self.ideas_title.configure(text=f"Analysis — {getattr(self, '_ana_title', '')}")
-        self.ideas_header.configure(text=header)
-        for i, (row, text) in enumerate(self._idea_rows):
-            if i < len(rows):
-                text.configure(text=rows[i])
-                row.pack(anchor="w", fill="x")
-            else:
-                row.pack_forget()
 
     def _accuracy_text(self, g) -> str:
         """chess.com's accuracy (games reviewed there) and King Coach's, from the saved analysis."""

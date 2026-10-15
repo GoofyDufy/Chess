@@ -24,8 +24,7 @@ import customtkinter as ctk
 
 import amazing
 import db
-import engine_ideas
-import engine_locator
+import engine_service
 import explorer
 import lichess_puzzles
 import my_lines
@@ -33,11 +32,11 @@ import progression
 import sac
 import theme
 from analyzer import win_chances
-from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
+from analysis_board import Analysis, IdeasPanel
+from board_widget import BOARD_PIXELS, REPLY_COLOR, ChessBoardWidget
 from eval_bar import EvalBar
 
 SAC_COLOR = "#F472B6"          # the sacrifice (the !! colour)
-IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move (analysis)
 POLL_MS = 100
 REPLY_DELAY_MS = 500
 MAX_PREP_TRIES = 30            # candidates checked for a real follow-up before giving up
@@ -77,15 +76,10 @@ class SacTab(ctk.CTkFrame):
         self.misses = 0
         self.line: List[chess.Move] = []
         self.session = {"rounds": 0, "clean": 0, "streak": 0, "best": 0}
-        # analysis after a round: its own board from the final position (◀ back to before the sacrifice)
-        self._ana_board: Optional[chess.Board] = None
-        self._ana_ahead: List[chess.Move] = []
-        self._ana_fen: Optional[str] = None
-        self._ideas: list = []
+        # analysis after a round (analysis_board.py): its own board from the final position
         self._result_texts = ("", "")
         self._build(mode_switch)
-        self._ideas_engine = engine_ideas.IdeasEngine(self, self._on_ideas, self._on_ideas_error)
-        self.bind("<Destroy>", lambda e: (self._jobs.put(None), self._ideas_engine.stop()))
+        self.bind("<Destroy>", lambda e: self._jobs.put(None), add="+")
         self.bind("<Map>", lambda e: self._on_shown())
         self._refresh_scores()
         self.after(POLL_MS, self._poll)
@@ -112,8 +106,8 @@ class SacTab(ctk.CTkFrame):
         self.next_button = theme.button(row, "Next sacrifice →", self._next_round, "primary", width=150)
         self.review_button = theme.button(row, "Review game", self._review_game, width=108)
         self.analyze_button = theme.button(row, "Analyze", self._start_analysis, width=84)
-        self.back_step_button = theme.button(row, "◀", lambda: self._analysis_step(-1), width=36)
-        self.fwd_step_button = theme.button(row, "▶", lambda: self._analysis_step(+1), width=36)
+        self.back_step_button = theme.button(row, "◀", lambda: self.analysis.step(-1), width=36)
+        self.fwd_step_button = theme.button(row, "▶", lambda: self.analysis.step(+1), width=36)
         self.done_button = theme.button(row, "Back", self._stop_analysis, width=80)
         self.game_line_button = theme.button(row, "Your game", self._analyse_game_line, width=100)
         self._game_line: List[chess.Move] = []     # what you actually played from the sacrifice on
@@ -123,22 +117,10 @@ class SacTab(ctk.CTkFrame):
         self.detail_label = theme.label(pad, "", "body", wraplength=BOARD_PIXELS)
         self.detail_label.pack(anchor="w", pady=(2, 0))
         # analysis: Stockfish's top lines, a row each, its dot in its arrow's colour
-        self.ideas_frame = ctk.CTkFrame(pad, fg_color="transparent")
-        self.ideas_title = theme.label(self.ideas_frame, "", "status", height=20)
-        self.ideas_title.pack(anchor="w")
-        self.ideas_header = theme.label(self.ideas_frame, "", "muted", height=18)
-        self.ideas_header.pack(anchor="w")
-        self._idea_rows = []
-        for i, rank in enumerate(("Best", "2nd", "3rd")):
-            irow = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
-            dot = ctk.CTkLabel(irow, text=f"● {rank}", width=46, height=20, anchor="w", font=theme.FONT_BOLD,
-                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
-            dot.pack(side="left")
-            text = theme.label(irow, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2", height=20)
-            text.pack(side="left", fill="x")
-            for widget in (irow, dot, text):
-                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
-            self._idea_rows.append((irow, text))
+        self.ideas_frame = IdeasPanel(pad, lambda i: self.analysis.follow(i))
+        self.analysis = Analysis(self, self.board_widget, self.ideas_frame, self.eval_bar,
+                                 flipped=lambda: self.me == chess.BLACK, title=self._analysis_title,
+                                 hint="click a line, then ▶ · ◀ takes back")
 
         right = ctk.CTkFrame(self, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
@@ -289,7 +271,7 @@ class SacTab(ctk.CTkFrame):
 
     def _on_move(self, move: chess.Move) -> None:
         if self.state == "analysis":
-            self._analysis_move(move)
+            self.analysis.play(move)
             return
         if self.state == "sac":
             sac_move = chess.Move.from_uci(self.cand.sac_uci)
@@ -534,9 +516,7 @@ class SacTab(ctk.CTkFrame):
         """The analysis board on your game's line: from before the sacrifice, ▶ walks what you played."""
         if self.state != "analysis" or not self._game_line:
             return
-        self._ana_board = self.start.copy()
-        self._ana_ahead = list(self._game_line)
-        self._show_analysis_board()
+        self.analysis.start(self.start, ahead=self._game_line)
 
     # ---------- analysis after the round ----------
 
@@ -545,8 +525,6 @@ class SacTab(ctk.CTkFrame):
             return
         self.state = "analysis"
         self._result_texts = (self.status_label.cget("text"), self.detail_label.cget("text"))
-        self._ana_board = self.board.copy()                 # the whole line: ◀ goes back before the sacrifice
-        self._ana_ahead = []
         self.status_label.pack_forget()
         self.detail_label.pack_forget()
         self.ideas_frame.pack(after=self._button_row, anchor="w", fill="x", pady=(10, 0))
@@ -554,13 +532,13 @@ class SacTab(ctk.CTkFrame):
         if self._game_line:
             buttons.append(self.game_line_button)
         self._show_buttons(*buttons, self.done_button)
-        self._show_analysis_board()
+        self.analysis.start(self.board)                 # the whole line: ◀ goes back before the sacrifice
 
     def _stop_analysis(self) -> None:
         if self.state != "analysis":
             return
         self.state = "result"
-        self._ana_fen = None
+        self.analysis.stop()
         self.ideas_frame.pack_forget()
         self.status_label.pack(after=self._button_row, anchor="w", pady=(10, 0))
         self.detail_label.pack(after=self.status_label, anchor="w", pady=(2, 0))
@@ -571,75 +549,14 @@ class SacTab(ctk.CTkFrame):
                    + ([self.review_button] if self.cand.game_id and self.on_review_game else []))
         self._show_buttons(*buttons)
 
-    def _analysis_move(self, move: chess.Move) -> None:
-        if move not in self._ana_board.legal_moves:
-            return
-        self._ana_ahead = self._ana_ahead[1:] if self._ana_ahead and self._ana_ahead[0] == move else []
-        self._ana_board.push(move)
-        self._show_analysis_board()
-
-    def _analysis_step(self, delta: int) -> None:
-        if self.state != "analysis":
-            return
-        board = self._ana_board
-        if delta < 0:
-            if board.move_stack:
-                self._ana_ahead.insert(0, board.pop())
-                self._show_analysis_board()
-            return
-        move = self._ana_ahead[0] if self._ana_ahead else (self._ideas[0].move if self._ideas else None)
-        if move is not None and move in board.legal_moves:
-            self._analysis_move(move)
-
-    def _follow_idea(self, i: int) -> None:
-        if self.state != "analysis" or i >= len(self._ideas):
-            return
-        pv = list(self._ideas[i].pv)
-        self._analysis_move(pv[0])
-        self._ana_ahead = pv[1:]
-
-    def _show_analysis_board(self) -> None:
-        board = self._ana_board
-        self.board_widget.show_board(board.copy())
+    def _analysis_title(self, board: chess.Board) -> str:
         side = "White" if board.turn == chess.WHITE else "Black"
         played = len(board.move_stack)
         where = ("before the sacrifice" if played == 0 else
                  "on the round's line" if board.move_stack == self.line[:played] else
                  "your game's line" if self._game_line and board.move_stack == self._game_line[:played] else
                  "your own line")
-        self.ideas_title.configure(text=f"Analysis — {side} to move · {where}")
-        self._ana_fen = board.fen()
-        self._ideas = []
-        self._show_ideas("Stockfish is thinking…", [])
-        if board.is_game_over():
-            outcome = board.outcome()
-            self._show_ideas("Game over: " + ("draw" if outcome.winner is None else
-                             ("White" if outcome.winner else "Black") + " wins") + ".", [])
-            return
-        self._ideas_engine.analyse(self._ana_fen)
-
-    def _on_ideas(self, fen: str, depth: int, ideas) -> None:
-        if self.state != "analysis" or fen != self._ana_fen or not ideas:
-            return
-        self._ideas = ideas
-        board = chess.Board(fen)
-        self._show_ideas(f"Stockfish depth {depth} · click a line, then ▶ · ◀ takes back",
-                         [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
-        self.board_widget.set_marked_arrows(
-            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
-        self.eval_bar.set(ideas[0].cp_white, flipped=self.me == chess.BLACK)
-
-    def _on_ideas_error(self, message: str) -> None:
-        self._show_ideas(message, [])
-
-    def _show_ideas(self, header: str, rows) -> None:
-        self.ideas_header.configure(text=header)
-        for i, (irow, text) in enumerate(self._idea_rows):
-            if i < len(rows):
-                text.configure(text=rows[i])
-                irow.pack(anchor="w", fill="x")
-            else:
-                irow.pack_forget()
+        return f"{side} to move · {where}"
 
     def _review_game(self) -> None:
         if self.cand is not None and self.cand.game_id and self.on_review_game:
@@ -670,47 +587,38 @@ class SacTab(ctk.CTkFrame):
     def _start_engine(self) -> None:
         if self._engine_started:
             return
-        path = engine_locator.find_stockfish()
-        if path is None:
+        if not engine_service.available():
             self.status_label.configure(text="Stockfish not found — see Import & Analyze for setup help.",
                                         text_color=theme.ERROR)
             return
         self._engine_started = True
-        threading.Thread(target=self._engine_loop, args=(path,), daemon=True).start()
+        threading.Thread(target=self._engine_loop, daemon=True).start()
 
-    def _engine_loop(self, path: str) -> None:
-        try:
-            engine = chess.engine.SimpleEngine.popen_uci(path)
-        except Exception as e:
-            self._results.put(("error", str(e)))
-            return
-        try:
-            while True:
-                job = self._jobs.get()
-                if job is None:
-                    break
-                if job[0] == "prepare":
-                    self._results.put(("prepared", job[1], sac.follow_ups(engine, job[1])))
-                elif job[0] == "reply":
-                    _, token, fen, me, done = job
-                    board = chess.Board(fen)
-                    reply = sac.their_reply(engine, board)
-                    step = None
-                    if reply is not None:
-                        board.push(reply)
-                        step = sac.step(engine, board, me, done)
-                    self._results.put(("replied", token, reply, step))
-                else:
-                    _, token, fen, move, step = job
-                    right, cp = sac.judge(engine, chess.Board(fen), move, step)
-                    self._results.put(("judged", token, move, right, cp))
-        except Exception as e:
-            self._results.put(("error", str(e)))
-        finally:
+    def _engine_loop(self) -> None:
+        """Jobs from the UI, one at a time, on the app's shared Stockfish (engine_service.py)."""
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                break
             try:
-                engine.quit()
-            except Exception:
-                pass
+                with engine_service.borrow() as engine:
+                    if job[0] == "prepare":
+                        self._results.put(("prepared", job[1], sac.follow_ups(engine, job[1])))
+                    elif job[0] == "reply":
+                        _, token, fen, me, done = job
+                        board = chess.Board(fen)
+                        reply = sac.their_reply(engine, board)
+                        step = None
+                        if reply is not None:
+                            board.push(reply)
+                            step = sac.step(engine, board, me, done)
+                        self._results.put(("replied", token, reply, step))
+                    else:
+                        _, token, fen, move, step = job
+                        right, cp = sac.judge(engine, chess.Board(fen), move, step)
+                        self._results.put(("judged", token, move, right, cp))
+            except Exception as e:
+                self._results.put(("error", str(e)))
 
     def _poll(self) -> None:
         if not self.winfo_exists():

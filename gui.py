@@ -23,6 +23,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 import db
+import engine_service
 import paths
 import profiles
 import progression
@@ -54,6 +55,9 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("King Coach")
+        # the shared Stockfish (engine_service.py) goes with the window
+        engine_service.reopen()
+        self.bind("<Destroy>", lambda e: engine_service.shutdown() if e.widget is self else None, add="+")
         theme.apply_theme(self)
         # the logo — a pawn and the king in its shadow (icons/): window / taskbar icon and the sidebar
         icons = paths.resource_dir() / "icons"
@@ -238,4 +242,7 @@ class App(ctk.CTk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    try:
+        App().mainloop()
+    finally:
+        engine_service.shutdown()

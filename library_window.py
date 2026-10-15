@@ -27,7 +27,7 @@ import chess
 import chess.engine
 import customtkinter as ctk
 
-import engine_locator
+import engine_service
 import library_character
 import my_lines
 import opening_importer
@@ -285,8 +285,7 @@ class LibraryWindow(ctk.CTkToplevel):
 
     def _start_describing(self) -> None:
         todo = opening_library.undescribed(self.conn, library_character.VERSION)
-        path = engine_locator.find_stockfish()
-        if not todo or path is None or self._describing:
+        if not todo or not engine_service.available() or self._describing:
             return
         self._describing, self._to_describe, self._described_now = True, len(todo), 0
         by_id = {o.id: o for o in todo}
@@ -295,22 +294,23 @@ class LibraryWindow(ctk.CTkToplevel):
         def worker():
             done = set()
             try:
-                with chess.engine.SimpleEngine.popen_uci(path) as engine:
-                    while not self._stop.is_set():
-                        oid = None
-                        while self._urgent:                 # a line you clicked first
-                            cand = self._urgent.popleft()
-                            if cand in by_id and cand not in done:
-                                oid = cand
-                                break
-                        while oid is None and order:
-                            cand = order.popleft()
-                            if cand not in done:
-                                oid = cand
-                        if oid is None:
+                while not self._stop.is_set():
+                    oid = None
+                    while self._urgent:                 # a line you clicked first
+                        cand = self._urgent.popleft()
+                        if cand in by_id and cand not in done:
+                            oid = cand
                             break
-                        done.add(oid)
-                        self._queue.put(("described", (oid, library_character.describe(engine, by_id[oid]))))
+                    while oid is None and order:
+                        cand = order.popleft()
+                        if cand not in done:
+                            oid = cand
+                    if oid is None:
+                        break
+                    done.add(oid)
+                    with engine_service.borrow() as engine:
+                        described = library_character.describe(engine, by_id[oid])
+                    self._queue.put(("described", (oid, described)))
             except Exception:
                 pass
             self._queue.put(("describe done", None))

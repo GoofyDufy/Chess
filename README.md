@@ -315,6 +315,14 @@ sidebar. Several players can share the app: each gets their own database
 - **The scan for amazing moves and missed sacrifices is saved per game.** The
   first scan takes a few seconds, and after that only new or re-analysed games
   are scanned again.
+- **One analysis board everywhere.** Puzzle Review, Sacrifice!! and Game Review
+  all use the same analysis board (`analysis_board.py`), and Opening Drill uses
+  the same Stockfish panel. A fix or new feature there reaches every screen.
+- **One shared Stockfish.** The interactive screens use a single Stockfish that
+  stays running (`engine_service.py`), so an analysis board doesn't wait for
+  Stockfish to start. Each search waits its turn, so a long job on one screen
+  doesn't block another for long. Game analysis, puzzle sorting and Play still
+  use engines of their own.
 
 ## Tests
 

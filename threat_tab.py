@@ -20,7 +20,7 @@ import chess.pgn
 import customtkinter as ctk
 
 import db
-import engine_locator
+import engine_service
 import progression
 import spot
 import theme
@@ -357,45 +357,36 @@ class ThreatTab(ctk.CTkFrame):
     def _start_engine(self) -> None:
         if self._engine_started:
             return
-        path = engine_locator.find_stockfish()
-        if path is None:
+        if not engine_service.available():
             self.status_label.configure(text="Stockfish not found — see Import & Analyze for setup help.",
                                         text_color=theme.ERROR)
             return
         self._engine_started = True
-        threading.Thread(target=self._engine_loop, args=(path,), daemon=True).start()
+        threading.Thread(target=self._engine_loop, daemon=True).start()
 
-    def _engine_loop(self, path: str) -> None:
-        try:
-            engine = chess.engine.SimpleEngine.popen_uci(path)
-        except Exception as e:
-            self._results.put(("error", str(e)))
-            return
-        try:
-            while True:
-                job = self._jobs.get()
-                if job is None:
-                    break
-                if job[0] == "assess":
-                    _, cand, previous, want, tries = job
-                    board = chess.Board(cand.fen)
-                    assessment = None if board.is_game_over() else threat.assess(engine, board)
-                    self._results.put(("assessed", cand, assessment, previous, want, tries))
-                elif job[0] == "threat":
-                    _, token, fen, assessment, move = job
-                    real, gain = threat.judge_threat(engine, chess.Board(fen), assessment, move)
-                    self._results.put(("threat", token, move, real, gain))
-                else:
-                    _, token, fen, assessment, move = job
-                    good, loss = threat.judge_answer(engine, chess.Board(fen), assessment, move)
-                    self._results.put(("answer", token, move, good, loss))
-        except Exception as e:
-            self._results.put(("error", str(e)))
-        finally:
+    def _engine_loop(self) -> None:
+        """Jobs from the UI, one at a time, on the app's shared Stockfish (engine_service.py)."""
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                break
             try:
-                engine.quit()
-            except Exception:
-                pass
+                with engine_service.borrow() as engine:
+                    if job[0] == "assess":
+                        _, cand, previous, want, tries = job
+                        board = chess.Board(cand.fen)
+                        assessment = None if board.is_game_over() else threat.assess(engine, board)
+                        self._results.put(("assessed", cand, assessment, previous, want, tries))
+                    elif job[0] == "threat":
+                        _, token, fen, assessment, move = job
+                        real, gain = threat.judge_threat(engine, chess.Board(fen), assessment, move)
+                        self._results.put(("threat", token, move, real, gain))
+                    else:
+                        _, token, fen, assessment, move = job
+                        good, loss = threat.judge_answer(engine, chess.Board(fen), assessment, move)
+                        self._results.put(("answer", token, move, good, loss))
+            except Exception as e:
+                self._results.put(("error", str(e)))
 
     def _poll(self) -> None:
         if not self.winfo_exists():

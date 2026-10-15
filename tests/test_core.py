@@ -1011,5 +1011,79 @@ class MakeItWorkTests(unittest.TestCase):
         self.assertFalse(sac.judge(poor, board, chess.Move.from_uci("a2a3"), step)[0])
 
 
+class AnalysisBoardTests(unittest.TestCase):
+    """The shared analysis board's moves (no Tk, no Stockfish: stand-ins)."""
+
+    class _Widget:
+        flipped = False
+
+        def __init__(self):
+            self.board = None
+
+        def show_board(self, board, flipped=None):
+            self.board = board
+
+        def set_marked_arrows(self, arrows):
+            self.arrows = arrows
+
+        def bind(self, *a, **k):
+            pass
+
+        def after(self, *a, **k):
+            pass
+
+    class _Panel:
+        def set_title(self, text):
+            self.title = text
+
+        def show(self, header, rows=()):
+            self.header, self.rows = header, list(rows)
+
+    def setUp(self):
+        import analysis_board
+        import engine_service
+        self._available = engine_service.available
+        engine_service.available = lambda: False          # no engine: the panel says so
+        self.widget, self.panel = self._Widget(), self._Panel()
+        self.a = analysis_board.Analysis(self.widget, self.widget, self.panel)
+
+    def tearDown(self):
+        import engine_service
+        engine_service.available = self._available
+
+    def test_ahead_line_floor_and_branching(self):
+        e4, e5, nf3 = (chess.Move.from_uci(u) for u in ("e2e4", "e7e5", "g1f3"))
+        self.a.start(chess.Board(), ahead=[e4, e5, nf3])
+        self.assertIn("Stockfish not found", self.panel.header)
+        self.assertTrue(self.a.step(1))
+        self.assertTrue(self.a.step(1))
+        self.assertEqual(self.a.board.move_stack, [e4, e5])
+        self.assertTrue(self.a.step(-1))
+        self.assertEqual(self.a.ahead, [e5, nf3])              # ▶ plays it again
+        self.assertTrue(self.a.play(chess.Move.from_uci("c7c5")))
+        self.assertEqual(self.a.ahead, [])                     # a branch: the line's gone
+        self.a.walk(-999)
+        self.assertEqual(self.a.board.move_stack, [])
+        self.assertFalse(self.a.step(-1))                      # not past the start
+        self.assertFalse(self.a.play(chess.Move.from_uci("e2e5")))   # illegal
+
+    def test_following_an_idea(self):
+        import engine_ideas
+        self.a.start(chess.Board())
+        pv = [chess.Move.from_uci(u) for u in ("d2d4", "d7d5", "c2c4")]
+        self.a.ideas = [engine_ideas.Idea(pv[0], pv, 30, None)]
+        self.a.follow(0)
+        self.assertEqual(self.a.board.move_stack, pv[:1])
+        self.assertEqual(self.a.ahead, pv[1:])
+        self.a.stop()
+        self.assertFalse(self.a.step(1))
+
+    def test_no_stockfish_borrow(self):
+        import engine_service
+        with self.assertRaises(engine_service.NoStockfish):
+            with engine_service.borrow():
+                pass
+
+
 if __name__ == "__main__":
     unittest.main()

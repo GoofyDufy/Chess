@@ -23,6 +23,7 @@ import chess.engine
 import customtkinter as ctk
 
 import engine_locator
+import engine_service
 import explorer
 import my_openings
 import opening_commentary
@@ -224,7 +225,7 @@ class MyGamesView(ctk.CTkFrame):
 
         def worker():
             try:
-                with chess.engine.SimpleEngine.popen_uci(path) as engine:
+                with engine_service.borrow() as engine:
                     n = opening_commentary.compare(engine, board, mine, prep)
                 self._results.put((d, n, None))
             except Exception as e:
@@ -331,7 +332,7 @@ class MyGamesView(ctk.CTkFrame):
                     after = board.copy()
                     after.push(chess.Move.from_uci(uci))
                     after_stats[uci] = after_cached.get(uci) or fetch(after.fen(), fetched)
-                with chess.engine.SimpleEngine.popen_uci(path) as engine:
+                with engine_service.borrow() as engine:
                     choices = practical.evaluate(engine, board, ucis, pos, after_stats, d.prep_ucis, d.played_uci)
                 self._results.put(("practical", d, (bands, fetched, choices, None)))
             except Exception as e:
@@ -385,13 +386,13 @@ class MyGamesView(ctk.CTkFrame):
 
         def worker():
             try:
-                with chess.engine.SimpleEngine.popen_uci(path) as engine:
-                    for d in todo:
-                        if self._stop.is_set():
-                            break
+                for d in todo:
+                    if self._stop.is_set():
+                        break
+                    with engine_service.borrow() as engine:
                         n = opening_commentary.compare(engine, self._board(d), chess.Move.from_uci(d.played_uci),
                                                        [chess.Move.from_uci(u) for u in d.prep_ucis])
-                        self._results.put((d, n, None))
+                    self._results.put((d, n, None))
             except Exception:
                 pass
             self._results.put(("batch done", None, None))

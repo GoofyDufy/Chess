@@ -26,9 +26,9 @@ import opening_notes
 import progression
 from play_window import PlayWindow
 import theme
-from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
+from analysis_board import IdeasPanel, idea_arrows, idea_rows
+from board_widget import BOARD_PIXELS, REPLY_COLOR, ChessBoardWidget
 
-IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move
 from drill import DrillResult, OpeningDrillSession, format_move_list
 from models import PlayerColor
 from tree_view import LIKELY_TEXT, TreeView, move_label as tree_view_label, short_name
@@ -89,20 +89,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.recap_label.pack(pady=(2, 0), anchor="w")
         # Stockfish's ideas while exploring the Tree: a row per line, its dot in its arrow's
         # colour; click a row to step through that line (shown only when switched on)
-        self.ideas_frame = ctk.CTkFrame(board_pad, fg_color="transparent")
-        self.ideas_header = theme.label(self.ideas_frame, "", "muted", wraplength=BOARD_PIXELS)
-        self.ideas_header.pack(anchor="w")
-        self._idea_rows = []
-        for i, rank in enumerate(("Best", "2nd", "3rd")):
-            row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
-            dot = ctk.CTkLabel(row, text=f"● {rank}", width=46, anchor="w", font=theme.FONT_BOLD,
-                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
-            dot.pack(side="left")
-            text = theme.label(row, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2")
-            text.pack(side="left", fill="x")
-            for widget in (row, dot, text):
-                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
-            self._idea_rows.append((row, text))
+        self.ideas_frame = IdeasPanel(board_pad, self._follow_idea, title=False, row_height=None)
         self._idea_lines: list = []            # the ideas shown (engine_ideas.Idea)
         self._pv_ahead: List[chess.Move] = []  # rest of the Stockfish line being stepped through
 
@@ -651,18 +638,11 @@ class OpeningDrillTab(ctk.CTkFrame):
         for label in (self.move_note_label, self.recap_label):
             if not label.cget("text") and label.winfo_manager():
                 label.pack_forget()
-        self.ideas_header.configure(text=header)
-        for i, (row, text) in enumerate(self._idea_rows):
-            if i < len(rows):
-                text.configure(text=rows[i])
-                row.pack(anchor="w", fill="x")
-            else:
-                row.pack_forget()
+        self.ideas_frame.show(header, rows)
 
     def _on_ideas(self, fen: str, depth: int, ideas) -> None:
         if fen != self._ideas_fen or not self.ideas_var.get() or not self._exploring():
             return                                   # moved on, switched off, or drilling now
-        board = chess.Board(fen)
         self._idea_lines = ideas
         if not ideas:
             self._show_ideas_panel("No moves — the game is over here.", [])
@@ -670,9 +650,8 @@ class OpeningDrillTab(ctk.CTkFrame):
             return
         self._show_ideas_panel(
             f"Stockfish, depth {depth} — arrows as coloured below · click a line, then ▶",
-            [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
-        self.board_widget.set_marked_arrows(
-            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
+            idea_rows(fen, ideas))
+        self.board_widget.set_marked_arrows(idea_arrows(ideas))
 
     def _on_ideas_error(self, message: str) -> None:
         self._show_ideas_panel(message, [])
