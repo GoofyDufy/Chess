@@ -7,7 +7,8 @@ colour; clicking a row plays that line (on_pick(i)).
 Analysis: a board of its own on the screen's ChessBoardWidget, from any
 position. Moves can be played for either side; ◀ takes back (not past
 `floor`), ▶ plays the next move of `ahead` (the game / the solution / a
-clicked Stockfish line), else Stockfish's best move. Stockfish runs on a
+clicked Stockfish line), else Stockfish's best move. peek(board): just
+Stockfish's lines for a position the screen shows (Game Review's top moves). Stockfish runs on a
 background thread (engine_ideas.py); its answers land here on the UI thread.
 """
 
@@ -34,6 +35,12 @@ def idea_arrows(ideas) -> list:
 def idea_rows(fen: str, ideas) -> List[str]:
     board = chess.Board(fen)
     return [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas]
+
+
+def idea_chips(fen: str, ideas) -> List[str]:
+    """Short form, one move each: '+0.32 d5'."""
+    board = chess.Board(fen)
+    return [f"{idea.eval_text()} {board.san(idea.move)}" for idea in ideas]
 
 
 def game_over_text(board: chess.Board) -> str:
@@ -88,6 +95,35 @@ class IdeasPanel(ctk.CTkFrame):
                 row.pack_forget()
 
 
+class TopMovesRow(ctk.CTkFrame):
+    """One line: 'Stockfish:  ● +0.32 d5   ● +0.10 d6   ● -0.05 c5', each in
+    its arrow's colour, clickable (on_pick(i)). For screens with no room for
+    the full IdeasPanel."""
+
+    def __init__(self, master, on_pick: Callable[[int], None]):
+        super().__init__(master, fg_color="transparent")
+        self.lead = theme.label(self, "", "muted", height=20)
+        self.lead.pack(side="left")
+        self._chips = []
+        for i in range(len(_RANKS)):
+            chip = ctk.CTkLabel(self, text="", height=20, anchor="w", font=theme.FONT_BOLD, cursor="hand2",
+                                text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA")
+            chip.bind("<Button-1>", lambda e, i=i: on_pick(i))
+            self._chips.append(chip)
+
+    def set_title(self, text: str) -> None:
+        pass
+
+    def show(self, header: str, rows: List[str] = ()) -> None:
+        self.lead.configure(text=header)
+        for i, chip in enumerate(self._chips):
+            if i < len(rows):
+                chip.configure(text=f"● {rows[i]}")
+                chip.pack(side="left", padx=(10, 0))
+            else:
+                chip.pack_forget()
+
+
 class Analysis:
     """owner: the screen (for after() and <Destroy>). flipped(): board
     orientation. title(board): the panel's heading for a position.
@@ -97,15 +133,18 @@ class Analysis:
                  flipped: Optional[Callable[[], bool]] = None,
                  title: Optional[Callable[[chess.Board], str]] = None,
                  hint: str = "click a line, then ▶",
-                 on_shown: Optional[Callable[[chess.Board], None]] = None):
+                 on_shown: Optional[Callable[[chess.Board], None]] = None,
+                 peek_panel: Optional[TopMovesRow] = None):
         self.board_widget = board_widget
         self.panel = panel
+        self.peek_panel = peek_panel or panel   # where peek() shows its lines
         self.eval_bar = eval_bar
         self._flipped = flipped or (lambda: board_widget.flipped)
         self._title = title or (lambda board: ("White" if board.turn == chess.WHITE else "Black") + " to move")
         self.hint = hint
         self.on_shown = on_shown
         self.active = False
+        self.peeking = False                  # ideas for a position shown elsewhere (see peek)
         self.board = chess.Board()
         self.floor = 0                        # moves on the board ◀ can't take back
         self.ahead: List[chess.Move] = []     # ▶ plays these first
@@ -188,16 +227,41 @@ class Analysis:
         self.panel.show("Stockfish is thinking…")
         self.engine.analyse(self._fen)
 
+    def peek(self, board: chess.Board) -> None:
+        """Stockfish's top moves for a position the screen shows itself (not
+        the analysis board), in peek_panel and as arrows; the board and eval
+        bar are left alone."""
+        self.peeking = True
+        self._fen = board.fen()
+        self.ideas = []
+        self.board_widget.set_marked_arrows([])
+        if board.is_game_over():
+            self.peek_panel.show(game_over_text(board))
+            return
+        self.peek_panel.show("Stockfish is thinking…")
+        self.engine.analyse(self._fen)
+
+    def unpeek(self) -> None:
+        self.peeking = False
+        if not self.active:
+            self._fen = None
+            self.ideas = []
+
     # ---------- Stockfish ----------
 
     def _on_ideas(self, fen: str, depth: int, ideas) -> None:
-        if not self.active or fen != self._fen or not ideas:
+        if not (self.active or self.peeking) or fen != self._fen or not ideas:
             return                                     # moved on / stopped
         self.ideas = ideas
-        self.panel.show(f"Stockfish depth {depth} · {self.hint}", idea_rows(fen, ideas))
+        if self.active:
+            self.panel.show(f"Stockfish depth {depth} · {self.hint}", idea_rows(fen, ideas))
+        elif isinstance(self.peek_panel, TopMovesRow):
+            self.peek_panel.show("Stockfish:", idea_chips(fen, ideas))
+        else:
+            self.peek_panel.show(f"Stockfish depth {depth}", idea_rows(fen, ideas))
         self.board_widget.set_marked_arrows(idea_arrows(ideas))
-        if self.eval_bar is not None:
+        if self.eval_bar is not None and self.active:  # peeking: the screen's own evaluation stays
             self.eval_bar.set(ideas[0].cp_white, flipped=self._flipped())
 
     def _on_error(self, message: str) -> None:
-        self.panel.show(message)
+        (self.panel if self.active else self.peek_panel).show(message)

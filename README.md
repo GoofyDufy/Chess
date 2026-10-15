@@ -178,6 +178,11 @@ Step through any analyzed game: evaluation graph, mistakes marked
   with Stockfish's top 3 lines (green / blue / grey arrows) and the
   evaluation bar. It says whether you're still on the game's line.
   **Back to game** returns to where you were.
+- **Stockfish's top moves** (a checkbox on the Evaluation card, remembered):
+  as you click through the game, Stockfish's top moves for each position
+  appear as arrows and on one line under the move description, for example
+  "Stockfish: ● +0.46 d5 ● +0.62 d6". Clicking one starts Analyze there and
+  plays that line.
 
 ### Opening Drill
 Your repertoire, drilled: the computer plays the other side, you play your
@@ -318,6 +323,10 @@ sidebar. Several players can share the app: each gets their own database
 - **One analysis board everywhere.** Puzzle Review, Sacrifice!! and Game Review
   all use the same analysis board (`analysis_board.py`), and Opening Drill uses
   the same Stockfish panel. A fix or new feature there reaches every screen.
+  The panel shows the 2nd and 3rd lines only when they're real alternatives.
+  A line is hidden when it's more than 3 pawns behind the best one, or when
+  it's losing for you while the best line is winning. Then only the clear best
+  move is shown.
 - **One shared Stockfish.** The interactive screens use a single Stockfish that
   stays running (`engine_service.py`), so an analysis board doesn't wait for
   Stockfish to start. Each search waits its turn, so a long job on one screen

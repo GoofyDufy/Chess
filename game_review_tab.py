@@ -32,7 +32,7 @@ import my_openings
 import opening_library
 import theme
 from analyzer import MATE_CP, MIN_CHANCES_LOST, win_chances
-from analysis_board import Analysis, IdeasPanel
+from analysis_board import Analysis, IdeasPanel, TopMovesRow
 from board_widget import BOARD_PIXELS, REPLY_COLOR, ChessBoardWidget
 from eval_bar import EvalBar
 from models import TIME_FILTERS, PlayerColor, in_time_filter, time_class
@@ -103,9 +103,9 @@ class GameReviewTab(ctk.CTkFrame):
 
     def _build(self) -> None:
         left = theme.card(self)
-        left.pack(side="left", padx=(24, 12), pady=24, anchor="n")
+        left.pack(side="left", padx=(24, 12), pady=16, anchor="n")       # 16: room for Stockfish's lines at 768 px
         pad = ctk.CTkFrame(left, fg_color="transparent")
-        pad.pack(padx=18, pady=16)
+        pad.pack(padx=18, pady=12)
         self.title_label = theme.label(pad, "Pick a game on the right", "muted", wraplength=BOARD_PIXELS)
         self.title_label.pack(anchor="w")
         # the opening: its named line, and where it left your prep (and who left it)
@@ -123,10 +123,13 @@ class GameReviewTab(ctk.CTkFrame):
         self.detail_label.pack(anchor="w", pady=(2, 0))
         # analysis mode (Analyze, analysis_board.py): a board of its own from the move shown,
         # Stockfish's top lines a row each (shown while analysing)
-        self.ideas_frame = IdeasPanel(pad, lambda i: self.analysis.follow(i))
+        self.ideas_frame = IdeasPanel(pad, self._pick_idea)
+        # clicking through with "Stockfish's top moves" on: one compact line (no room for more)
+        self.top_moves_row = TopMovesRow(pad, self._pick_idea)
         self.analysis = Analysis(self, self.board_widget, self.ideas_frame, self.eval_bar,
                                  flipped=lambda: self.my_color == chess.BLACK, title=self._analysis_title,
-                                 hint="click a line, then →", on_shown=self._on_analysis_shown)
+                                 hint="click a line, then →", on_shown=self._on_analysis_shown,
+                                 peek_panel=self.top_moves_row)
         nav = ctk.CTkFrame(pad, fg_color="transparent")
         nav.pack(fill="x", pady=(12, 0))
         self._nav_frame = nav
@@ -138,7 +141,7 @@ class GameReviewTab(ctk.CTkFrame):
         self.mistake_button.pack(side="right")
 
         right = ctk.CTkFrame(self, fg_color="transparent")
-        right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=24)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 24), pady=16)
 
         games_card = theme.card(right)
         games_card.pack(fill="x")                 # a fixed few rows: the moves list below gets the rest
@@ -167,7 +170,15 @@ class GameReviewTab(ctk.CTkFrame):
         graph_card.pack(fill="x", pady=(14, 0))
         graph = ctk.CTkFrame(graph_card, fg_color="transparent")
         graph.pack(fill="x", padx=16, pady=12)
-        theme.label(graph, "EVALUATION (YOUR POINT OF VIEW)", "section").pack(anchor="w", pady=(0, 6))
+        graph_head = ctk.CTkFrame(graph, fg_color="transparent")
+        graph_head.pack(fill="x", pady=(0, 6))
+        theme.label(graph_head, "EVALUATION (YOUR POINT OF VIEW)", "section").pack(side="left")
+        # Stockfish's top moves for each position as you click through (an option, remembered)
+        self.top_moves_var = tk.BooleanVar(value=db.get_setting(self.conn, "review_top_moves") == "1")
+        ctk.CTkCheckBox(graph_head, text="Stockfish's top moves", variable=self.top_moves_var,
+                        command=self._on_top_moves_toggle, font=theme.FONT_SMALL, text_color=theme.TEXT_SOFT,
+                        fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, border_color=theme.BORDER_STRONG,
+                        checkbox_width=16, checkbox_height=16).pack(side="right")
         self.graph = tk.Canvas(graph, width=GRAPH_W, height=GRAPH_H, bg=theme.PANEL_ALT,
                                highlightthickness=0)
         self.graph.pack(fill="x")
@@ -347,6 +358,33 @@ class GameReviewTab(ctk.CTkFrame):
             self.moves_list.selection_clear(0, tk.END)
             self.moves_list.selection_set(self.ply - 1)
             self.moves_list.see(self.ply - 1)
+        self._show_top_moves(board)
+
+    # ---------- Stockfish's top moves while clicking through (an option) ----------
+
+    def _on_top_moves_toggle(self) -> None:
+        db.set_setting(self.conn, "review_top_moves", "1" if self.top_moves_var.get() else "0")
+        if self.moves and not self.analysis.active:
+            self._go(self.ply)
+
+    def _show_top_moves(self, board: chess.Board) -> None:
+        if not self.top_moves_var.get():
+            self.analysis.unpeek()
+            self.top_moves_row.pack_forget()
+            return
+        if not self.top_moves_row.winfo_manager():
+            self.top_moves_row.pack(before=self._nav_frame, anchor="w", fill="x", pady=(6, 0))
+        self.analysis.peek(board)
+
+    def _pick_idea(self, i: int) -> None:
+        """A line clicked: while clicking through the game, it starts Analyze here and plays it."""
+        if not self.analysis.active:
+            ideas = self.analysis.ideas
+            if i >= len(ideas):
+                return
+            self._start_analysis()
+            self.analysis.ideas = ideas
+        self.analysis.follow(i)
 
     def _eval_at_ply(self) -> Optional[int]:
         """Best saved evaluation (YOUR point of view) for the shown position:
@@ -422,7 +460,7 @@ class GameReviewTab(ctk.CTkFrame):
         self._describe_prep(last)
         # arrow: best move in the current position when it's your move
         upcoming = self.evals.get(self.ply)
-        if upcoming is not None and upcoming["best_move_uci"]:
+        if upcoming is not None and upcoming["best_move_uci"] and not self.top_moves_var.get():
             move = chess.Move.from_uci(upcoming["best_move_uci"])
             self.board_widget.arrows = {(move.from_square, move.to_square)}
             self.board_widget.redraw()
@@ -450,6 +488,7 @@ class GameReviewTab(ctk.CTkFrame):
         self._ana_from_ply = self.ply
         self.analyze_button.configure(text="Back to game", width=112)
         self.mistake_button.pack_forget()
+        self.top_moves_row.pack_forget()
         self.status_label.pack_forget()
         self.detail_label.pack_forget()
         self.ideas_frame.pack(before=self._nav_frame, anchor="w", fill="x", pady=(12, 0))
@@ -462,6 +501,7 @@ class GameReviewTab(ctk.CTkFrame):
         if not self.analysis.active:
             return
         self.analysis.stop()
+        self.analysis.unpeek()
         self.analyze_button.configure(text="Analyze", width=84)
         self.mistake_button.pack(side="right")
         self.ideas_frame.pack_forget()

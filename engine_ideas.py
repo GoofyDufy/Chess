@@ -24,6 +24,7 @@ from analyzer import MATE_CP
 LINES = 3                  # top moves shown
 QUICK_DEPTH = 12           # first answer (well under a second)
 DEEP_DEPTH = 18            # then this
+MAX_BEHIND_CP = 300        # a 2nd / 3rd line further behind the best isn't shown (a clearly better move)
 PV_PLIES = 6               # moves of each line shown (keeps each on one line under the board)
 POLL_MS = 100
 
@@ -53,6 +54,17 @@ def line_text(board: chess.Board, pv: List[chess.Move]) -> str:
             parts.append(f"{b.fullmove_number}...{b.san(move)}" if i == 0 else b.san(move))
         b.push(move)
     return " ".join(parts)
+
+
+def worth_showing(ideas: List[Idea], turn: chess.Color) -> List[Idea]:
+    """The best line, plus the others that are real alternatives for the side to
+    move: no more than MAX_BEHIND_CP behind it, and not losing when the best is winning."""
+    if not ideas:
+        return []
+    sign = 1 if turn == chess.WHITE else -1
+    best = sign * ideas[0].cp_white
+    return [ideas[0]] + [i for i in ideas[1:]
+                         if best - sign * i.cp_white <= MAX_BEHIND_CP and not (best > 0 and sign * i.cp_white < 0)]
 
 
 class IdeasEngine:
@@ -104,7 +116,8 @@ class IdeasEngine:
                         break            # moved on already
                     with engine_service.borrow() as engine:
                         infos = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=LINES)
-                    self._results.put(("ideas", fen, depth, [self._idea(i) for i in infos if i.get("pv")]))
+                    ideas = [self._idea(i) for i in infos if i.get("pv")]
+                    self._results.put(("ideas", fen, depth, worth_showing(ideas, board.turn)))
             except Exception as e:
                 self._results.put(("error", str(e)))
 

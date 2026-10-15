@@ -1078,6 +1078,20 @@ class AnalysisBoardTests(unittest.TestCase):
         self.a.stop()
         self.assertFalse(self.a.step(1))
 
+    def test_only_real_alternatives_shown(self):
+        from engine_ideas import Idea, worth_showing
+        m = chess.Move.from_uci("e2e4")
+        ideas = lambda *cps: [Idea(m, [m], cp, None) for cp in cps]
+        cps = lambda shown: [i.cp_white for i in shown]
+        self.assertEqual(cps(worth_showing(ideas(150, 90, -100), chess.WHITE)), [150, 90])   # 3rd loses
+        self.assertEqual(cps(worth_showing(ideas(350, 120, 60), chess.WHITE)), [350, 120, 60])     # within 3
+        self.assertEqual(cps(worth_showing(ideas(450, 120), chess.WHITE)), [450])               # 3.3 behind
+        self.assertEqual(cps(worth_showing(ideas(500, 150, 210), chess.WHITE)), [500, 210])  # 3.5 behind
+        self.assertEqual(cps(worth_showing(ideas(-120, -40, 60), chess.BLACK)), [-120, -40])  # Black's view
+        self.assertEqual(cps(worth_showing(ideas(-50, -200, -320), chess.WHITE)), [-50, -200, -320])  # all bad, close
+        self.assertEqual(cps(worth_showing(ideas(0, -80), chess.WHITE)), [0, -80])            # equal best
+        self.assertEqual(cps(worth_showing(ideas(100_000, 400), chess.WHITE)), [100_000])     # mate vs not
+
     def test_no_stockfish_borrow(self):
         import engine_service
         with self.assertRaises(engine_service.NoStockfish):
