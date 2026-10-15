@@ -5,6 +5,7 @@ line), wrong moves are retryable, and you get a move recap at the end."""
 
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -15,6 +16,7 @@ import chess
 
 import db
 import explorer
+import engine_ideas
 import lichess_ui
 import random
 
@@ -24,10 +26,12 @@ import opening_notes
 import progression
 from play_window import PlayWindow
 import theme
-from board_widget import BOARD_PIXELS, ChessBoardWidget
+from board_widget import BOARD_PIXELS, GAME_MOVE_COLOR, REPLY_COLOR, ChessBoardWidget
+
+IDEA_COLORS = [REPLY_COLOR, GAME_MOVE_COLOR, "#8A8F98"]   # Stockfish's 1st / 2nd / 3rd move
 from drill import DrillResult, OpeningDrillSession, format_move_list
 from models import PlayerColor
-from tree_view import TreeView, move_label as tree_view_label, short_name
+from tree_view import LIKELY_TEXT, TreeView, move_label as tree_view_label, short_name
 
 ADD_LINES = "Add lines"
 TREE = "Tree"
@@ -76,6 +80,24 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.move_note_label.pack(pady=(2, 0), anchor="w")
         self.recap_label = theme.label(board_pad, "", "body", wraplength=BOARD_PIXELS)
         self.recap_label.pack(pady=(2, 0), anchor="w")
+        # Stockfish's ideas while exploring the Tree: a row per line, its dot in its arrow's
+        # colour; click a row to step through that line (shown only when switched on)
+        self.ideas_frame = ctk.CTkFrame(board_pad, fg_color="transparent")
+        self.ideas_header = theme.label(self.ideas_frame, "", "muted", wraplength=BOARD_PIXELS)
+        self.ideas_header.pack(anchor="w")
+        self._idea_rows = []
+        for i, rank in enumerate(("Best", "2nd", "3rd")):
+            row = ctk.CTkFrame(self.ideas_frame, fg_color="transparent", cursor="hand2")
+            dot = ctk.CTkLabel(row, text=f"● {rank}", width=46, anchor="w", font=theme.FONT_BOLD,
+                               text_color=IDEA_COLORS[i] if i < 2 else "#A9AFBA", cursor="hand2")
+            dot.pack(side="left")
+            text = theme.label(row, "", "body", wraplength=BOARD_PIXELS - 50, cursor="hand2")
+            text.pack(side="left", fill="x")
+            for widget in (row, dot, text):
+                widget.bind("<Button-1>", lambda e, i=i: self._follow_idea(i))
+            self._idea_rows.append((row, text))
+        self._idea_lines: list = []            # the ideas shown (engine_ideas.Idea)
+        self._pv_ahead: List[chess.Move] = []  # rest of the Stockfish line being stepped through
 
         button_row = ctk.CTkFrame(board_pad, fg_color="transparent")
         button_row.pack(pady=(10, 0), anchor="w")
@@ -138,12 +160,17 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.variation_listbox.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
         variation_scroll.pack(side="left", fill="y", pady=8)
         self.variation_listbox.bind("<Double-Button-1>", lambda e: self._start_drill())
+        self.variation_listbox.bind("<Delete>", lambda e: self._delete_selected_variation())
         self.preview_label = theme.label(drill, "", "muted", wraplength=340)
         self.preview_label.pack(anchor="w", fill="x", pady=(6, 0))
         self._variation_roots = []
 
-        self.start_button = theme.button(drill, "Start drill", self._start_drill, "primary")
-        self.start_button.pack(fill="x", pady=(12, 6))
+        start_row = ctk.CTkFrame(drill, fg_color="transparent")
+        start_row.pack(fill="x", pady=(12, 6))
+        self.start_button = theme.button(start_row, "Start drill", self._start_drill, "primary")
+        self.start_button.pack(side="left", fill="x", expand=True)
+        # delete the variation selected above (also the Delete key on the list)
+        theme.button(start_row, "Delete…", self._delete_selected_variation, width=90).pack(side="left", padx=(8, 0))
         theme.label(
             drill, "Pick a variation (double-click to start), or leave it on Any line "
                    "for a random one. The computer plays the other side.",
@@ -183,8 +210,37 @@ class OpeningDrillTab(ctk.CTkFrame):
                 view.pack(fill="both", expand=True)
             else:
                 view.pack_forget()
-        if name == TREE and self._tree is None:
-            self._refresh_tree()
+        if name == TREE:
+            # show the tree of what you're drilling (or picked in Setup)
+            wanted = self._scope_to_match()
+            if wanted is not None and wanted != self.tree_scope_var.get():
+                self.tree_scope_var.set(wanted)
+                self._clear_draft()
+                self._refresh_tree()
+            elif self._tree is None:
+                self._refresh_tree()
+            elif self._drilling():
+                self._follow_drill_in_tree()
+
+    def _drilling(self) -> bool:
+        return self.session is not None and not self.session.is_finished()
+
+    def _scope_to_match(self) -> Optional[str]:
+        """The Tree's scope for the line being drilled — its own repertoire
+        (even when drilling a group such as All White openings) — or, with no
+        drill on, the repertoire picked in Setup (a group: all of that colour)."""
+        if self._drilling() and self.session.target_path:
+            first = self.session.target_path[0]
+            label = f"{first.repertoire_name} ({first.my_color.value})"
+            return label if label in self._scope_options() else None
+        selection = self._selected_repertoire()
+        if selection is None:
+            return None
+        name, color = selection
+        if db.parse_group(name) is not None:
+            return self.ALL_SCOPE[color]
+        label = f"{name} ({color})"
+        return label if label in self._scope_options() else None
 
     # ---------- Tree view: the repertoire as a living tree (tree_view.py) ----------
 
@@ -193,10 +249,16 @@ class OpeningDrillTab(ctk.CTkFrame):
         self._tree_node: Optional[opening_tree.Node] = None
         self._tree_focus: list = []            # the line ◀ ▶ walk along
         self._draft: List[chess.Move] = []     # a new branch being played from _tree_node (not saved)
-        self.tree_view = TreeView(parent, self._on_tree_select, on_wheel=self._tree_step)
+        # which tree: every repertoire of a colour (a tree per first move) or one repertoire
+        self.tree_scope_var = tk.StringVar(value=db.get_setting(self.conn, "tree_scope") or "")
+        self.tree_scope_menu = theme.option_menu(parent, [""], self.tree_scope_var,
+                                                 lambda _: self._on_tree_scope(), width=240)
+        self.tree_scope_menu.pack(anchor="w", pady=(0, 8))
+        # a small requested height: the tree takes whatever room the controls below leave
+        self.tree_view = TreeView(parent, self._on_tree_select, on_wheel=self._tree_step, height=200)
         self.tree_view.on_deviation = self._on_deviation
         self.tree_view.on_context = self._on_tree_context
-        self._start: Optional[opening_tree.Node] = None   # where the opening starts
+        self._starts: list = []                # (repertoire, node where its opening starts)
         self._deviations: dict = {}            # id(node) -> [opening_tree.Deviation] from Lichess
         self.tree_view.pack(fill="both", expand=True)
         info = ctk.CTkFrame(parent, fg_color="transparent")
@@ -208,20 +270,34 @@ class OpeningDrillTab(ctk.CTkFrame):
         # Lichess players' replies your lines don't cover, at this position
         self.tree_dev_label = theme.label(info, "", "muted", wraplength=380, text_color="#9AA1AD")
         self.tree_dev_label.pack(anchor="w", fill="x", pady=(2, 4))
+        toggles = ctk.CTkFrame(info, fg_color="transparent")
+        toggles.pack(fill="x", pady=(0, 8))
+        box = dict(font=theme.FONT_SMALL, text_color=theme.TEXT_SOFT, fg_color=theme.ACCENT,
+                   hover_color=theme.ACCENT_HOVER, border_color=theme.BORDER_STRONG,
+                   checkbox_width=16, checkbox_height=16)
         self.show_before_var = tk.BooleanVar(value=db.get_setting(self.conn, "tree_show_before") != "0")
-        ctk.CTkCheckBox(
-            info, text="Show other openings (replies before yours starts)", variable=self.show_before_var,
-            command=self._on_show_before, font=theme.FONT_SMALL, text_color=theme.TEXT_SOFT,
-            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, border_color=theme.BORDER_STRONG,
-            checkbox_width=16, checkbox_height=16,
-        ).pack(anchor="w", pady=(0, 8))
+        ctk.CTkCheckBox(toggles, text="Other openings", variable=self.show_before_var,
+                        command=self._on_show_before, **box).pack(side="left")
+        # Stockfish's ideas for the position you're looking at (never while drilling)
+        self.ideas_var = tk.BooleanVar(value=db.get_setting(self.conn, "tree_ideas") == "1")
+        ctk.CTkCheckBox(toggles, text="Stockfish's ideas", variable=self.ideas_var,
+                        command=self._on_ideas_toggle, **box).pack(side="left", padx=(16, 0))
+        # zoom in on the branch you're on (bigger, clearer Lichess sidelines)
+        self.zoom_var = tk.BooleanVar(value=db.get_setting(self.conn, "tree_zoom") != "0")
+        ctk.CTkCheckBox(toggles, text="Zoom in", variable=self.zoom_var,
+                        command=self._on_zoom_toggle, **box).pack(side="left", padx=(16, 0))
+        self.tree_view.zoom = self.zoom_var.get()
+        self._ideas = engine_ideas.IdeasEngine(self, self._on_ideas, self._on_ideas_error)
+        self._ideas_fen: Optional[str] = None
+        self.bind("<Destroy>", lambda e: self._ideas.stop(), add="+")
         row = ctk.CTkFrame(info, fg_color="transparent")
         row.pack(fill="x")
         theme.button(row, "◀", lambda: self._tree_step(-1), width=44).pack(side="left")
         theme.button(row, "▶", lambda: self._tree_step(+1), width=44).pack(side="left", padx=(6, 0))
         self.tree_drill_button = theme.button(row, "Drill this line", self._drill_tree_line, "primary")
         self.tree_save_button = theme.button(row, "Save branch", self._save_draft, "primary")
-        self.tree_discard_button = theme.button(row, "Discard", self._discard_draft, width=90)
+        self.tree_discard_button = theme.button(row, "Discard", lambda: (self._pv_ahead.clear(), self._discard_draft()),
+                                                width=90)
         self._layout_tree_buttons()
 
     def _layout_tree_buttons(self) -> None:
@@ -233,28 +309,78 @@ class OpeningDrillTab(ctk.CTkFrame):
         else:
             self.tree_drill_button.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
+    # tree scope: "All White openings" / "All Black openings" / one repertoire
+    ALL_SCOPE = {"white": "All White openings", "black": "All Black openings"}
+
+    def _scope_options(self) -> List[str]:
+        pairs = getattr(self, "_repertoire_pairs", [])
+        colors = [c for c in ("white", "black") if any(col == c for _, col in pairs)]
+        reps = [label for label, (name, _) in zip(getattr(self, "_repertoire_labels", []), pairs)
+                if db.parse_group(name) is None]
+        return [self.ALL_SCOPE[c] for c in colors] + reps
+
+    def _tree_scope(self):
+        """(repertoire name or None for all of a colour, colour) — or None."""
+        value = self.tree_scope_var.get()
+        for color, label in self.ALL_SCOPE.items():
+            if value == label:
+                return None, color
+        labels = getattr(self, "_repertoire_labels", [])
+        if value in labels and db.parse_group(self._repertoire_pairs[labels.index(value)][0]) is None:
+            return self._repertoire_pairs[labels.index(value)]
+        return None
+
+    def _on_tree_scope(self) -> None:
+        db.set_setting(self.conn, "tree_scope", self.tree_scope_var.get())
+        self._clear_draft()
+        self._refresh_tree()
+
+    def _scope_repertoires(self) -> List[str]:
+        scope = self._tree_scope()
+        if scope is None:
+            return []
+        name, color = scope
+        return [name] if name else [r for r, c in getattr(self, "_repertoire_pairs", [])
+                                    if c == color and db.parse_group(r) is None]
+
     def _refresh_tree(self) -> None:
-        """Rebuilds the tree for the repertoire picked in Setup."""
-        selection = self._selected_repertoire()
-        if selection is None:
+        """Rebuilds the tree for the chosen scope (default: every repertoire
+        of the Setup repertoire's colour, a tree per first move)."""
+        options = self._scope_options()
+        self.tree_scope_menu.configure(values=options or [""])
+        if self.tree_scope_var.get() not in options:
+            selection = self._selected_repertoire()
+            self.tree_scope_var.set(self.ALL_SCOPE[selection[1]] if selection else (options[0] if options else ""))
+        scope = self._tree_scope()
+        if scope is None:
             self._tree = None
             self.tree_view.set_tree(None, "")
             self.tree_line_label.configure(text="No repertoire yet")
             self.tree_moves_label.configure(text=f"Add some lines ({ADD_LINES}) to grow a tree.")
             return
-        name, color = selection
+        name, color = scope
         self._tree = opening_tree.build(self.conn, name, PlayerColor(color))
-        self.tree_view.set_tree(self._tree, name)
-        self._start = opening_tree.start_node(self.conn, self._tree, name, PlayerColor(color))
+        self.tree_view.set_tree(self._tree, name or "")
+        self._starts = []
+        for rep_name in self._scope_repertoires():
+            node = self._tree.node_for_path(opening_tree.start_path(self.conn, rep_name, PlayerColor(color)))
+            if node is not None:
+                self._starts.append((rep_name, node))
         self.tree_view.show_before = self.show_before_var.get()
-        self.tree_view.set_start(self._start)
+        self.tree_view.set_starts(self._starts)
         self._update_deviations()
         self._tree_focus = self._tree.leaves[0][1] if self._tree.leaves else []
-        self._show_tree_node(self._tree.root, follow=False)
+        if self._drilling():
+            self._follow_drill_in_tree()      # don't touch a drill's board: just show where it is
+        else:
+            self._show_tree_node(self._tree.root, follow=False)
 
-    def _on_tree_select(self, node: opening_tree.Node) -> None:
+    def _on_tree_select(self, node: opening_tree.Node, keep_line: bool = False) -> None:
         """A click in the tree: show that position on the board (this ends a
-        drill in progress — Drill this line starts one from the tree)."""
+        drill in progress — Drill this line starts one from the tree).
+        keep_line: stepping along a Stockfish line, not leaving it."""
+        if not keep_line:
+            self._pv_ahead = []
         if self._draft and not messagebox.askyesno(
                 "Discard new branch?", "You have a new branch that isn't saved. Discard it?", parent=self):
             return
@@ -278,8 +404,9 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.tree_view.select(node, self._tree_focus)
         line = next((name for name, path, _ in (self._tree.leaves if self._tree else [])
                      if path == self._tree_focus), None)
-        rep = self._selected_repertoire()
-        self.tree_line_label.configure(text=short_name(line, rep[0]) if line and rep else "")
+        scope = self._tree_scope()
+        scope_name = scope[0] if scope and scope[0] else ""
+        self.tree_line_label.configure(text=short_name(line, scope_name) if line else "")
         board, sans = chess.Board(), []
         for n in node.path:
             move = chess.Move.from_uci(n.move_uci)
@@ -293,9 +420,10 @@ class OpeningDrillTab(ctk.CTkFrame):
         self._show_node_deviations(node)
         if follow:
             return
-        flipped = rep is not None and rep[1] == PlayerColor.BLACK.value
+        flipped = scope is not None and scope[1] == PlayerColor.BLACK.value
         self.board_widget.show_board(board, flipped=flipped)
-        self.line_name_label.configure(text=f"Exploring: {short_name(line, rep[0])}" if line and rep else "Exploring")
+        self._request_ideas(board)
+        self.line_name_label.configure(text=f"Exploring: {short_name(line, scope_name)}" if line else "Exploring")
         note = node.move.notes if node.move is not None else None
         self.status_label.configure(text="Exploring the tree — Drill this line to practise it.",
                                     text_color=theme.TEXT_MUTED)
@@ -306,13 +434,13 @@ class OpeningDrillTab(ctk.CTkFrame):
     def _update_deviations(self) -> None:
         """Popular Lichess replies your lines don't cover, from the cached
         explorer data (downloaded in the background — see _download_opening_data)."""
-        selection = self._selected_repertoire()
-        if self._tree is None or selection is None or not explorer.get_token(self.conn):
+        scope = self._tree_scope()
+        if self._tree is None or scope is None or not explorer.get_token(self.conn):
             self._deviations = {}
         else:
             bands = explorer.rating_bands(self.conn)
             self._deviations = opening_tree.deviations(
-                self._tree, lambda fen: explorer.cached(self.conn, fen, bands), PlayerColor(selection[1]))
+                self._tree, lambda fen: explorer.cached(self.conn, fen, bands), PlayerColor(scope[1]))
         self.tree_view.set_deviations(self._deviations)
         if self._tree_node is not None:
             self._show_node_deviations(self._tree_node)
@@ -323,20 +451,128 @@ class OpeningDrillTab(ctk.CTkFrame):
                 text=f"Connect Lichess ({ADD_LINES} → Connect Lichess...) to see where players leave these lines.")
             return
         devs = self._deviations.get(id(node), [])
-        before = self._start is not None and not opening_tree.is_inside(node, self._start)
-        rep = self._selected_repertoire()
+        before = not self.tree_view.inside(node)
+        reps = sorted({p[0].repertoire_name for _, p in node.lines()})
+        which = reps[0] if len(reps) == 1 else "openings"
         if devs and before:
-            self.tree_dev_label.configure(text=f"Before your {rep[0] if rep else 'opening'} starts — other "
+            self.tree_dev_label.configure(text=f"Before your {which} start{'s' if len(reps) == 1 else ''} — other "
                                                "openings Lichess players choose here: " + " · ".join(
                 f"{d.san} {d.share:.0%}" for d in devs) + ".")
         elif devs:
+            where = ("  — no room for them in the tree here: tick Zoom in to see and answer them."
+                     if getattr(self.tree_view, "sidelines_hidden", False)
+                     else f"  — click one in the tree to answer it ({LIKELY_TEXT}).")
             self.tree_dev_label.configure(text="Lichess players here also play: " + " · ".join(
-                f"{d.san} {d.share:.0%}" for d in devs) + "  — click one in the tree to answer it.")
+                f"{d.san} {d.share:.0%}" for d in devs) + where)
         else:
             total = sum(len(v) for v in self._deviations.values())
             self.tree_dev_label.configure(
                 text=f"{total} popular deviation{'s' if total != 1 else ''} from these lines (grey rings — select one to see them)."
                 if total else "No popular deviations found yet (data downloads in the background).")
+
+    # ---------- Stockfish's ideas (engine_ideas.py) ----------
+
+    def _on_zoom_toggle(self) -> None:
+        db.set_setting(self.conn, "tree_zoom", "1" if self.zoom_var.get() else "0")
+        self.tree_view.set_zoom(self.zoom_var.get())
+
+    def _on_ideas_toggle(self) -> None:
+        db.set_setting(self.conn, "tree_ideas", "1" if self.ideas_var.get() else "0")
+        if self.ideas_var.get():
+            if self._exploring():
+                self._request_ideas(self.board_widget.board)
+        else:
+            self._clear_ideas()
+
+    def _request_ideas(self, board: chess.Board) -> None:
+        """Ask for Stockfish's top moves for the explored position."""
+        if not self.ideas_var.get() or not self._exploring():
+            return
+        self._ideas_fen = board.fen()
+        self._show_ideas_panel("Stockfish is thinking…", [])
+        self._ideas.analyse(self._ideas_fen)
+
+    def _show_ideas_panel(self, header: str, rows) -> None:
+        if not self.ideas_frame.winfo_manager():
+            self.ideas_frame.pack(after=self.recap_label, anchor="w", fill="x", pady=(4, 0))
+        # room on short screens: the drill's note / recap lines are empty while exploring
+        for label in (self.move_note_label, self.recap_label):
+            if not label.cget("text") and label.winfo_manager():
+                label.pack_forget()
+        self.ideas_header.configure(text=header)
+        for i, (row, text) in enumerate(self._idea_rows):
+            if i < len(rows):
+                text.configure(text=rows[i])
+                row.pack(anchor="w", fill="x")
+            else:
+                row.pack_forget()
+
+    def _on_ideas(self, fen: str, depth: int, ideas) -> None:
+        if fen != self._ideas_fen or not self.ideas_var.get() or not self._exploring():
+            return                                   # moved on, switched off, or drilling now
+        board = chess.Board(fen)
+        self._idea_lines = ideas
+        if not ideas:
+            self._show_ideas_panel("No moves — the game is over here.", [])
+            self.board_widget.set_marked_arrows([])
+            return
+        self._show_ideas_panel(
+            f"Stockfish, depth {depth} — arrows as coloured below · click a line, then ▶",
+            [f"{idea.eval_text()}   {engine_ideas.line_text(board, idea.pv)}" for idea in ideas])
+        self.board_widget.set_marked_arrows(
+            [(idea.move.from_square, idea.move.to_square, IDEA_COLORS[i]) for i, idea in enumerate(ideas)][::-1])
+
+    def _on_ideas_error(self, message: str) -> None:
+        self._show_ideas_panel(message, [])
+
+    def _clear_ideas(self) -> None:
+        self._ideas_fen = None
+        self._idea_lines = []
+        self.ideas_frame.pack_forget()
+        self._restore_drill_labels()
+
+    def _restore_drill_labels(self) -> None:
+        """Put back the note / recap lines the ideas panel made room with."""
+        if not self.move_note_label.winfo_manager():
+            self.move_note_label.pack(after=self.status_label, pady=(2, 0), anchor="w")
+        if not self.recap_label.winfo_manager():
+            self.recap_label.pack(after=self.move_note_label, pady=(2, 0), anchor="w")
+        if self.session is None or self.session.is_finished():
+            self.board_widget.set_marked_arrows([])
+
+    def _follow_idea(self, i: int) -> None:
+        """A Stockfish line clicked: play its first move; ▶ plays on along it."""
+        if i >= len(self._idea_lines) or not self._exploring():
+            return
+        pv = list(self._idea_lines[i].pv)
+        self._play_line_move(pv[0], ahead=pv[1:])
+
+    def _play_line_move(self, move: chess.Move, ahead: List[chess.Move]) -> None:
+        """Play a move while exploring — into the tree if your lines have it,
+        else as a new branch — keeping `ahead` (the rest of a Stockfish line) for ▶."""
+        node = self._tree_node
+        if not self._draft:
+            child = next((c for c in node.children if c.move.move_uci == move.uci()), None)
+            if child is not None:
+                self._on_tree_select(child, keep_line=True)
+                self._pv_ahead = list(ahead)
+                self._note_following()
+                return
+        board = node.board()
+        for m in self._draft:
+            board.push(m)
+        if move not in board.legal_moves:
+            return
+        self._draft.append(move)
+        self._pv_ahead = list(ahead)
+        self._show_draft()
+        self._note_following()
+
+    def _note_following(self) -> None:
+        if self._pv_ahead:
+            self.status_label.configure(
+                text=f"Following Stockfish's line — ▶ for the next move ({len(self._pv_ahead)} more)"
+                     + (", Save branch to keep it." if self._draft else "."), text_color=theme.TEXT_MUTED)
 
     def _on_show_before(self) -> None:
         db.set_setting(self.conn, "tree_show_before", "1" if self.show_before_var.get() else "0")
@@ -344,28 +580,86 @@ class OpeningDrillTab(ctk.CTkFrame):
         self.tree_view.set_deviations(self._deviations)
 
     def _on_tree_context(self, node: opening_tree.Node, x: int, y: int) -> None:
-        """Right-click in the tree: move where the opening starts."""
-        selection = self._selected_repertoire()
-        if selection is None or self._tree is None:
+        """Right-click in the tree: move where an opening starts (one entry per
+        repertoire whose lines pass through here)."""
+        scope = self._tree_scope()
+        if scope is None or self._tree is None:
             return
-        name, color = selection
+        reps = sorted({p[0].repertoire_name for _, p in node.lines()}) or self._scope_repertoires()
         menu = tk.Menu(self, tearoff=0, bg=theme.PANEL_ALT, fg=theme.TEXT, activebackground=theme.CONTROL_BG,
                        activeforeground=theme.TEXT, font=theme.FONT_NATIVE)
         label = "the starting position" if node.move is None else tree_view_label(node)
-        menu.add_command(label=f"{name} starts here (after {label})" if node.move else f"{name} starts at move 1",
-                         command=lambda: self._set_opening_start(node))
-        menu.add_command(label="Use the default start (where all lines still agree)",
-                         command=lambda: self._set_opening_start(None))
+        for name in reps:
+            menu.add_command(label=f"{name} starts here (after {label})" if node.move else f"{name} starts at move 1",
+                             command=lambda n=name: self._set_opening_start(n, node))
+        menu.add_separator()
+        for name in reps:
+            menu.add_command(label=f"{name}: use the default start (where its lines still agree)",
+                             command=lambda n=name: self._set_opening_start(n, None))
+        if node.move is not None:
+            menu.add_separator()
+            menu.add_command(label=f"Delete {label} and everything after it…",
+                             command=lambda: self._delete_branch(node))
+            first = self._branch_start(node)
+            if first is not None and first is not node:
+                menu.add_command(label=f"Delete the whole branch from {tree_view_label(first)}…",
+                                 command=lambda: self._delete_branch(first))
         try:
             menu.tk_popup(x, y)
         finally:
             menu.grab_release()
 
-    def _set_opening_start(self, node: Optional[opening_tree.Node]) -> None:
-        name, color = self._selected_repertoire()
-        opening_tree.set_start(self.conn, name, PlayerColor(color), node)
-        self._start = opening_tree.start_node(self.conn, self._tree, name, PlayerColor(color))
-        self.tree_view.set_start(self._start)
+    def _branch_start(self, node: opening_tree.Node) -> Optional[opening_tree.Node]:
+        """The first move of the branch this position is on (where it leaves
+        the other lines)."""
+        for b in self._tree.branches:
+            if any(n is node for n in b.nodes):
+                return b.nodes[0]
+        return None
+
+    def _delete_branch(self, node: opening_tree.Node) -> None:
+        """Removes this move and everything after it from every line through it."""
+        lines = node.lines()
+        if not lines:
+            return
+        names = sorted({name for name, _ in lines})
+        shown = "\n".join(f"  • {n}" for n in names[:8]) + (f"\n  … and {len(names) - 8} more" if len(names) > 8 else "")
+        others = len(node.parent.lines()) - len(lines) if node.parent is not None else 0
+        keep = (f"\n\nThe moves before it stay, along with the {others} other line(s) through them."
+                if others else "")
+        if not messagebox.askyesno(
+                "Delete branch",
+                f"Delete {tree_view_label(node)} and everything after it?\n\n"
+                f"This removes {len(lines)} line(s):\n{shown}{keep}\n\nThis can't be undone "
+                "(re-import the PGN file to get lines back).", parent=self):
+            return
+        ply = node.ply
+        row_ids = list({path[ply - 1].id for _, path in lines if len(path) >= ply})
+        removed = db.delete_branch(self.conn, row_ids)
+        parent_path = [m.move_uci for m in node.path[:-1]]
+        self._clear_draft()
+        self._refresh_repertoire_list()        # the lists and the tree, without those lines
+        if self._tree is None:
+            self._refresh_tree()
+        if self._tree is not None:
+            back = self._tree.node_for_path(parent_path) or self._tree.root
+            lines_left = back.lines()
+            self._tree_focus = lines_left[0][1] if lines_left else []
+            self._show_tree_node(back, follow=False)
+        self.status_label.configure(text=f"Deleted {len(lines)} line(s) ({removed} moves).",
+                                    text_color=theme.TEXT_MUTED)
+
+    def _set_opening_start(self, repertoire: str, node: Optional[opening_tree.Node]) -> None:
+        color = PlayerColor(self._tree_scope()[1])
+        # saved as moves; a node of this (maybe combined) tree is a position in that repertoire too
+        if node is None:
+            opening_tree.set_start(self.conn, repertoire, color, None)
+        else:
+            db.set_setting(self.conn, opening_tree._start_key(repertoire, color),
+                           " ".join(m.move_uci for m in node.path))
+        start = self._tree.node_for_path(opening_tree.start_path(self.conn, repertoire, color))
+        self._starts = [(r, n) for r, n in self._starts if r != repertoire] + ([(repertoire, start)] if start else [])
+        self.tree_view.set_starts(self._starts)
         if self._tree_node is not None:
             self._show_node_deviations(self._tree_node)
 
@@ -384,12 +678,28 @@ class OpeningDrillTab(ctk.CTkFrame):
         current line. With a new branch: ◀ takes back its last move."""
         if self._tree is None or self._tree_node is None:
             return
+        if delta > 0 and self._pv_ahead:           # on along Stockfish's line
+            move = self._pv_ahead[0]
+            self._play_line_move(move, ahead=self._pv_ahead[1:])
+            return
+        following = bool(self._pv_ahead) or bool(self._draft)
         if self._draft:
             if delta < 0:
-                self._draft.pop()
+                back = self._draft.pop()
+                if following:
+                    self._pv_ahead.insert(0, back)     # ▶ plays it again
+                keep = list(self._pv_ahead)
                 self._show_draft() if self._draft else self._discard_draft()
+                self._pv_ahead = keep
+                self._note_following()
             return
         node = self._tree_node
+        if delta < 0 and self._pv_ahead and node.parent is not None:
+            keep = [chess.Move.from_uci(node.move.move_uci)] + self._pv_ahead
+            self._on_tree_select(node.parent, keep_line=True)
+            self._pv_ahead = keep
+            self._note_following()
+            return
         if delta < 0:
             target = node.parent
         else:
@@ -419,6 +729,10 @@ class OpeningDrillTab(ctk.CTkFrame):
         if self.session is not None:          # a finished drill: back to exploring
             self.session = None
             self._layout_buttons()
+        if self._pv_ahead and move == self._pv_ahead[0]:       # the move Stockfish's line goes on with
+            self._play_line_move(move, ahead=self._pv_ahead[1:])
+            return
+        self._pv_ahead = []                    # a different move: off Stockfish's line
         if not self._draft:
             child = next((c for c in node.children if c.move.move_uci == move.uci()), None)
             if child is not None:
@@ -442,6 +756,7 @@ class OpeningDrillTab(ctk.CTkFrame):
         for m in self._draft:
             board.push(m)
         self.board_widget.show_board(board)
+        self._request_ideas(board)
         sans = self._draft_sans()
         self.tree_view.set_draft(self._tree_node, sans)
         self.tree_line_label.configure(text="New branch")
@@ -464,8 +779,9 @@ class OpeningDrillTab(ctk.CTkFrame):
 
     def _save_draft(self) -> None:
         """Adds the new branch to the repertoire as its own line: the moves
-        to where it leaves the tree, then the new ones."""
-        selection = self._selected_repertoire()
+        to where it leaves the tree, then the new ones — into the repertoire
+        of the line it branches off."""
+        selection = self._line_repertoire()
         if not self._draft or selection is None:
             return
         rep_name, color = selection
@@ -496,8 +812,19 @@ class OpeningDrillTab(ctk.CTkFrame):
             self._show_tree_node(new, follow=False)
         self.status_label.configure(text=f"Saved “{name}” to {rep_name}.", text_color=theme.SUCCESS)
 
+    def _line_repertoire(self) -> Optional[tuple]:
+        """(repertoire, colour) of the line the tree is following — with every
+        repertoire on show, the line's own; else the tree's."""
+        scope = self._tree_scope()
+        if scope is None:
+            return None
+        if self._tree_focus:
+            return self._tree_focus[0].repertoire_name, scope[1]
+        reps = self._scope_repertoires()
+        return (reps[0], scope[1]) if reps else None
+
     def _drill_tree_line(self) -> None:
-        selection = self._selected_repertoire()
+        selection = self._line_repertoire()
         if selection is None or not self._tree_focus:
             return
         name, color = selection
@@ -521,7 +848,8 @@ class OpeningDrillTab(ctk.CTkFrame):
             return
         _, root, _ = self._selected_entry()
         self.preview_label.configure(text=self._line_preview(root))
-        self._render_plans(root.line_name if root else None, selection[0], PlayerColor(selection[1]))
+        self._render_plans(root.line_name if root else None, root.repertoire_name if root else selection[0],
+                           PlayerColor(selection[1]))
 
     def _render_plans(self, line_name: Optional[str], repertoire_name: str, my_color: PlayerColor) -> None:
         for child in self.plans_body.winfo_children():
@@ -684,7 +1012,20 @@ class OpeningDrillTab(ctk.CTkFrame):
 
     def _refresh_repertoire_list(self) -> None:
         pairs = db.list_repertoires(self.conn)
-        self._repertoire_labels = [f"{name} ({color})" for name, color in pairs]
+        # groups first ("All White openings", "White · 1.d4 openings"), then each repertoire
+        groups = []
+        for color in ("white", "black"):
+            if not any(c == color for _, c in pairs):
+                continue
+            side = color.capitalize()
+            groups.append((db.group_name(), color, f"All {side} openings"))
+            firsts = db.first_moves(self.conn, color)
+            if len(firsts) > 1:
+                for uci, san, _ in firsts:
+                    label = f"White · 1.{san} openings" if color == "white" else f"Black vs 1.{san}"
+                    groups.append((db.group_name(uci), color, label))
+        pairs = [(g, c) for g, c, _ in groups] + pairs
+        self._repertoire_labels = [label for _, _, label in groups] + [f"{name} ({color})" for name, color in pairs[len(groups):]]
         self._repertoire_pairs = pairs
         self.repertoire_dropdown.configure(values=self._repertoire_labels or [""])
         if self.repertoire_var.get() not in self._repertoire_labels:
@@ -941,7 +1282,8 @@ class OpeningDrillTab(ctk.CTkFrame):
         if selection is None or not explorer.get_token(self.conn):
             self._refresh_lichess_card()
             return
-        fens = explorer.opponent_positions(self.conn, selection[0])
+        fens = explorer.opponent_positions(self.conn, None if db.parse_group(selection[0]) is not None
+                                           else selection[0])
 
         def on_progress(done, total):
             self._lichess_progress = f"Downloading opening data: {done} / {total} positions…"
@@ -956,11 +1298,55 @@ class OpeningDrillTab(ctk.CTkFrame):
         lichess_ui.downloader.start(self, self.conn, fens, on_done, on_progress)
 
     def _move_share(self, fen: str, uci: str) -> Optional[float]:
-        """Share of Lichess games (at your level) with this move here; None if unknown."""
-        if not explorer.get_token(self.conn):
+        """Share of Lichess games (at your level) with this move here; None if
+        unknown. Positions and the rating band are remembered for a minute —
+        picking a line asks about the same positions many times."""
+        now = time.monotonic()
+        if now - getattr(self, "_share_cache_at", -1e9) > 60:
+            token = explorer.get_token(self.conn)
+            self._share_bands = explorer.rating_bands(self.conn) if token else None
+            self._share_cache, self._share_cache_at = {}, now
+        if self._share_bands is None:
             return None
-        stats = explorer.cached(self.conn, fen)
+        key = explorer.position_key(fen)
+        if key not in self._share_cache:
+            self._share_cache[key] = explorer.cached(self.conn, fen, self._share_bands)
+        stats = self._share_cache[key]
         return stats.share(uci) if stats is not None and stats.games else None
+
+    def _delete_selected_variation(self) -> None:
+        """Deletes the line picked in Setup's list — the whole imported line,
+        sidelines included (the Tree's right-click menu deletes part of one)."""
+        kind, root, label = self._selected_entry()
+        if kind != "line" or root is None:
+            messagebox.showinfo("Delete a line", "Select a line in the Variation list first "
+                                "(not Any line / Weak lines).", parent=self)
+            return
+        moves = self.conn.execute(
+            """WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL
+                   SELECT o.id FROM opening_lines o JOIN sub ON o.parent_id = sub.id)
+               SELECT COUNT(*) FROM sub""", (root.id,)).fetchone()[0]
+        ends = self.conn.execute(
+            """WITH RECURSIVE sub(id) AS (SELECT ? UNION ALL
+                   SELECT o.id FROM opening_lines o JOIN sub ON o.parent_id = sub.id)
+               SELECT COUNT(*) FROM opening_lines WHERE id IN (SELECT id FROM sub)
+               AND id NOT IN (SELECT parent_id FROM opening_lines WHERE parent_id IS NOT NULL)""",
+            (root.id,)).fetchone()[0]
+        detail = f" — it has {ends} lines (sidelines included)" if ends > 1 else ""
+        if not messagebox.askyesno(
+                "Delete line",
+                f"Delete “{label}” from {root.repertoire_name} ({root.my_color.value}){detail}?\n\n"
+                f"{moves} moves are removed. Other lines aren't touched. This can't be undone "
+                "(re-import the PGN file to get it back).", parent=self):
+            return
+        db.delete_branch(self.conn, [root.id])
+        if self.session is not None and self.session.target_path and self.session.target_path[0].id == root.id:
+            self.session = None              # it was being drilled
+            self._layout_buttons()
+        self._refresh_repertoire_list()
+        if self._tree is None and self.right_switch.get() == TREE:
+            self._refresh_tree()
+        self.status_label.configure(text=f"Deleted “{label}” ({moves} moves).", text_color=theme.TEXT_MUTED)
 
     def _selected_entry(self):
         sel = self.variation_listbox.curselection()
@@ -1062,7 +1448,13 @@ class OpeningDrillTab(ctk.CTkFrame):
     def _begin_line(self, kind: str, keep_view: bool = False) -> None:
         """Resets the board and panels for self.session's line and starts it.
         keep_view: stay on the current right-hand view (e.g. the Tree)."""
-        name, my_color = self.session.repertoire_name, self.session.my_color
+        self.ideas_frame.pack_forget()
+        self._restore_drill_labels()
+        self._pv_ahead = []
+        # the line's own repertoire (the session's may be a group like "All White openings")
+        name = self.session.target_path[0].repertoire_name if self.session.target_path \
+            else self.session.repertoire_name
+        my_color = self.session.my_color
         self._line_missed = False
         self._preview_index = None
         self._awaiting_retry = False

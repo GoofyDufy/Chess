@@ -33,7 +33,7 @@ from __future__ import annotations
 import random
 import sqlite3
 from dataclasses import dataclass
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import chess
 
@@ -56,6 +56,11 @@ class DrillResult:
     in_book: bool = False           # informational only: matched some OTHER line in the
                                      # repertoire at this position, even though it wasn't
                                      # accepted — never affects `correct` or the drilled line
+
+
+def _position(fen: str) -> str:
+    """FEN without the move counters, so transpositions count as one position."""
+    return " ".join(fen.split()[:4])
 
 
 class OpeningDrillSession:
@@ -87,7 +92,7 @@ class OpeningDrillSession:
             path.extend(self._tree_continuation_from(path[0]))
 
         self.target_path = path
-        self.line_name = path[0].line_name or self.repertoire_name
+        self.line_name = path[0].line_name or path[0].repertoire_name
         self.board = chess.Board()
         self.path_index = 0
         return True
@@ -97,7 +102,7 @@ class OpeningDrillSession:
         if not path:
             return False
         self.target_path = list(path)
-        self.line_name = path[0].line_name or self.repertoire_name
+        self.line_name = path[0].line_name or path[0].repertoire_name
         self.board = chess.Board()
         self.path_index = 0
         return True
@@ -137,27 +142,48 @@ class OpeningDrillSession:
         return lines
 
     def _weighted_line(self, roots: List[OpeningLine]) -> Optional[List[OpeningLine]]:
-        """A whole line, picked by how likely real opponents are to follow it
-        (see the module docstring). None when there's no data to weight by."""
+        """A whole line, picked with the chance a game would follow it: only
+        where your lines SPLIT does a choice count. At an opponent's split,
+        each reply your lines cover gets its share among those replies (how
+        often Lichess players at your level choose it, with a floor so rare
+        ones still come up); at your own split, each option in proportion to
+        the lines that go that way (so every line of yours gets its turn). A
+        position where all your lines go the same way changes nothing — so
+        long lines aren't penalised for having more moves.
+        None when there's no Lichess data at any of the opponent's splits."""
         lines = self._all_lines(roots)
-        weights, opponent_moves, known = [], [], False
+        offered: Dict[str, set] = {}       # position -> moves your lines play from it
+        through: Dict[tuple, int] = {}     # (position, move) -> lines going that way
         for line in lines:
-            weight, theirs = 1.0, []
-            for i, node in enumerate(line):
-                if not node.fen_before_move or self._is_mine(node.fen_before_move):
+            for node in line:
+                if node.fen_before_move:
+                    pos = _position(node.fen_before_move)
+                    offered.setdefault(pos, set()).add(node.move_uci)
+                    through[(pos, node.move_uci)] = through.get((pos, node.move_uci), 0) + 1
+        weights, known = [], False
+        for line in lines:
+            weight = 1.0
+            for node in line:
+                if not node.fen_before_move:
                     continue
-                theirs.append((i, node.move_uci))
-                share = self.move_share(node.fen_before_move, node.move_uci)
-                if share is not None:
-                    known = True
-                    weight *= max(share, MIN_REPLY_WEIGHT)
+                alts = offered[_position(node.fen_before_move)]
+                if len(alts) < 2:
+                    continue               # no choice here
+                pos = _position(node.fen_before_move)
+                if self._is_mine(node.fen_before_move):
+                    # your options: in proportion to the lines each one leads to
+                    weight *= through[(pos, node.move_uci)] / sum(through[(pos, a)] for a in alts)
+                    continue
+                shares = {a: self.move_share(node.fen_before_move, a) for a in alts}
+                if all(v is None for v in shares.values()):
+                    weight /= len(alts)
+                    continue
+                known = True
+                floor = {a: max(v or 0.0, MIN_REPLY_WEIGHT) for a, v in shares.items()}
+                weight *= floor[node.move_uci] / sum(floor.values())
             weights.append(weight)
-            opponent_moves.append(tuple(theirs))
         if not known:
             return None
-        # lines with the same opponent moves differ only in yours: share the weight
-        same = {k: opponent_moves.count(k) for k in set(opponent_moves)}
-        weights = [w / same[k] for w, k in zip(weights, opponent_moves)]
         return random.choices(lines, weights=weights)[0]
 
     def _is_mine(self, fen: str) -> bool:

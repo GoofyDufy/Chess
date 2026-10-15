@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import tkinter as tk
+import tkinter.font as tkfont
 from typing import Callable, Dict, List, Optional, Tuple
 
 import chess
@@ -30,6 +31,14 @@ SNAP_PX = 24             # the mouse picks the nearest move within this distance
 DRAFT_STEP = (15, -17)   # each move of a new (unsaved) branch: right and up from the last
 WILD = "#6B7280"         # Lichess deviations: replies your lines don't cover
 WILD_BEFORE = "#3F4450"  # ...before the opening starts (other openings): fainter
+# how often Lichess players at your level choose a sideline: grey / amber / red
+LIKELY = [(0.30, "#E8735E", "#F2A493"), (0.15, "#E6A94A", "#F0C27A"), (0.0, "#8A8F98", "#B4B9C2")]
+LIKELY_TEXT = "grey under 15% · amber 15–30% · red 30%+"
+
+
+def likely_colors(share: float) -> Tuple[str, str]:
+    """(line / ring colour, label colour) for a sideline played this often."""
+    return next((line, label) for floor, line, label in LIKELY if share >= floor)
 WILD_BEFORE_TEXT = "#6B7280"
 LABEL_AT = 0.78          # branch labels sit this far along their branch, where neighbours have spread apart
 LEAF_COLORS = ["#E6A94A", "#E8735E", "#D6789E", "#CBB26A", "#4FB3A5",
@@ -37,12 +46,19 @@ LEAF_COLORS = ["#E6A94A", "#E8735E", "#D6789E", "#CBB26A", "#4FB3A5",
 
 
 def short_name(name: str, repertoire: str) -> str:
-    """'Catalan - Closed' -> 'Closed' inside the Catalan repertoire."""
+    """'Catalan - Closed' -> 'Closed' inside the Catalan repertoire; with
+    every repertoire on show (repertoire ''), 'Catalan · Closed'."""
     for sep in (" - ", " — ", ": "):
         head, _, tail = name.partition(sep)
         if tail and head.strip().lower() == repertoire.strip().lower():
             return tail.strip()
+        if tail and not repertoire:
+            return f"{head.strip()} · {tail.strip()}"
     return name
+
+
+GLYPHS = {chess.KING: "♚", chess.QUEEN: "♛", chess.ROOK: "♜", chess.BISHOP: "♝", chess.KNIGHT: "♞",
+          chess.PAWN: "♟"}
 
 
 def move_label(node: Node) -> str:
@@ -63,8 +79,10 @@ class TreeView(ctk.CTkFrame):
         self.on_deviation: Optional[Callable[[Node, str], None]] = None   # (position, uci)
         self.deviations: Dict[int, list] = {}      # id(node) -> [opening_tree.Deviation]
         self._dev_items: Dict[int, Tuple[Node, str]] = {}
-        self.start: Optional[Node] = None          # where the opening starts (opening_tree.start_node)
+        self.starts: List[Tuple[str, Node]] = []   # (repertoire, where its opening starts)
+        self._board_items: Dict[int, Node] = {}     # mini-board square -> its first move (or the root)
         self.show_before = True                     # draw replies before the start (other openings)
+        self.zoom = True                            # zoom in on the branch you're on (see _zoom_branch)
         self.on_context: Optional[Callable[[Node, int, int], None]] = None   # right-click (node, x, y)
         self.canvas = tk.Canvas(self, bg=theme.PANEL_BG, highlightthickness=0, height=height)
         self.scroll = ctk.CTkScrollbar(self, orientation="horizontal", command=self.canvas.xview,
@@ -102,9 +120,13 @@ class TreeView(ctk.CTkFrame):
         self.focus_path = tree.leaves[0][1] if tree and tree.leaves else []
         self._relayout()
 
-    def set_start(self, node: Optional[Node]) -> None:
-        self.start = node
+    def set_starts(self, starts: List[Tuple[str, Node]]) -> None:
+        self.starts = list(starts)
         self._paint()
+
+    def inside(self, node: Node) -> bool:
+        """At or after where one of the openings starts (no starts set: everywhere)."""
+        return not self.starts or any(opening_tree.is_inside(node, start) for _, start in self.starts)
 
     def _on_right_click(self, event) -> None:
         node = self._node_at(event)
@@ -121,13 +143,33 @@ class TreeView(ctk.CTkFrame):
         self._paint()
 
     def select(self, node: Optional[Node], focus_path: Optional[List] = None) -> None:
+        """Inside a first move's tree, only that tree shows; at the start, all of them."""
         self.selected = node
         if focus_path is not None:
             self.focus_path = focus_path
-        self._paint()
+        focus = self.tree.first_move_of(node) if self.tree is not None and node is not None else None
+        if self.tree is not None and (focus is not self.tree.focus or self._zoom_branch() is not self.tree.zoom):
+            self._relayout()
+        else:
+            self._paint()
         self._scroll_into_view(node)
 
     # ---------- drawing ----------
+
+    def _zoom_branch(self) -> Optional[Branch]:
+        """Zoomed in: the branch you're on — or, on a line's last branch, the
+        one before it, so its neighbours show too. None: no zoom (at the start,
+        or still on the first move's own branch, where the board shows)."""
+        if not self.zoom or self.tree is None or self.selected is None or self.selected.move is None:
+            return None
+        branch = next((b for b in self.tree.branches if any(n is self.selected for n in b.nodes)), None)
+        if branch is not None and not branch.children and branch.parent is not None:
+            branch = branch.parent
+        return branch if branch is not None and branch.parent is not None else None
+
+    def set_zoom(self, on: bool) -> None:
+        self.zoom = on
+        self._relayout()
 
     def _on_resize(self, event) -> None:
         size = (event.width, event.height)
@@ -140,7 +182,8 @@ class TreeView(ctk.CTkFrame):
             self.canvas.delete("all")
             return
         w, h = max(self.canvas.winfo_width(), 200), max(self.canvas.winfo_height(), 200)
-        opening_tree.layout(self.tree, w, h)
+        focus = self.tree.first_move_of(self.selected) if self.selected is not None else None
+        opening_tree.layout(self.tree, w, h, focus=focus, zoom=self._zoom_branch())
         self._node_branch = {id(n): (b, i) for b in self.tree.branches for i, n in enumerate(b.nodes)}
         if self.tree.width > w + 1:
             self.scroll.pack(fill="x", padx=6, pady=(0, 4))
@@ -157,56 +200,65 @@ class TreeView(ctk.CTkFrame):
             node = node.parent
         return ids
 
+    @property
+    def overview(self) -> bool:
+        """Several first-move trees side by side: keep it plain — no names, move
+        labels or start flags (they show once you go into one tree; hovering a
+        leaf still names its line)."""
+        return (self.tree is not None and self.tree.focus is None
+                and sum(1 for b in self.tree.branches if b.parent is None) > 1)
+
     def _paint(self) -> None:
         c, tree = self.canvas, self.tree
         c.delete("all")
         self._items, self._branch_items = {}, {}
+        self._fonts = []                       # label fonts of the last drawing (kept alive while shown)
         if tree is None:
             return
         root = tree.root
-        c.create_oval(root.x - 120, root.y + 8, root.x + 120, root.y + 26, fill="#1C1F25", outline="")
+        self._paint_board()
+        self._paint_zoom_base()
         on_path = self._on_path()
         focus_ids = set()
-        if self.focus_path:
+        if self.focus_path and self.selected is not None and self.selected.move is not None:
+            # (at the start nothing is chosen yet: no line to trace ahead)
             node = tree.node_for_path([n.move_uci for n in self.focus_path])
             while node is not None:
                 focus_ids.add(id(node))
                 node = node.parent
 
         # bark: thick trunks first, so thinner twigs lie on top
-        for b in sorted(tree.branches, key=lambda b: -b.lines):
+        shown = [b for b in tree.branches if tree.visible(b)]
+        for b in sorted(shown, key=lambda b: -b.lines):
             x0, y0 = b.start_xy
             pts = opening_tree.curve(x0, y0, b.end.x, b.end.y)
             item = c.create_line(*pts, smooth="raw", splinesteps=24, width=opening_tree.thickness(b.lines),
                                  fill=BARK, capstyle="round")
             self._branch_items[item] = b
-        # trunk under the root
-        c.create_line(root.x, root.y, root.x, root.y + 14, width=opening_tree.thickness(len(tree.leaves)),
-                      fill=BARK, capstyle="round")
 
         # glow: the selected path solid, the rest of the focus line dashed
-        for b in tree.branches:
-            x0, y0 = b.start_xy
-            n = len(b.nodes)
+        for b in shown:
             solid = [i for i, node in enumerate(b.nodes) if id(node) in on_path]
             ahead = [i for i, node in enumerate(b.nodes) if id(node) in focus_ids and id(node) not in on_path]
             if solid:
-                self._glow_segment(b, 0.0, (max(solid) + 1) / n, dash=None)
+                self._glow_segment(b, 0.0, b.t_at(max(solid)), dash=None)
             if ahead:
-                start = (max(solid) + 1) / n if solid else 0.0
+                start = b.t_at(max(solid)) if solid else 0.0
                 self._glow_segment(b, start, 1.0, dash=(3, 6))
 
         # beads (every move), knots, leaves
-        for b in tree.branches:
-            for node in b.nodes[:-1]:
+        for b in shown:
+            for i, node in enumerate(b.nodes[:-1]):
+                if b.is_first_move and i == 0:
+                    continue                   # the piece on the mini board is this move
                 self._bead(node)
-            self._knot_or_leaf(b)
+            if not (b.is_first_move and len(b.nodes) == 1):
+                self._knot_or_leaf(b)
+            elif b.end.line_ends:
+                self._knot_or_leaf(b)
         self._label_branches()
-        c.create_oval(root.x - 8, root.y - 8, root.x + 8, root.y + 8, fill=theme.PANEL_BG,
-                      outline=theme.TEXT, width=2.5)
-        c.create_text(root.x, root.y + 22, text="Start", fill=theme.TEXT, font=(theme.FONT_FAMILY, 11, "bold"))
-        self._paint_deviations()
         self._paint_start_flag()
+        self._paint_deviations()
         if self.draft_anchor is not None:
             self._paint_draft()
         else:
@@ -250,6 +302,8 @@ class TreeView(ctk.CTkFrame):
             item = c.create_polygon(*self._leaf_shape(lx, ly, tilt), smooth=True, fill=color,
                                     outline="#111317", width=1)
             self._clickable(item, end)
+            if self.overview:
+                return
             name = short_name(end.line_ends[0][0], self.repertoire)
             if len(name) > NAME_CHARS:
                 name = name[:NAME_CHARS - 1].rstrip(" ,(") + "…"
@@ -273,7 +327,17 @@ class TreeView(ctk.CTkFrame):
     def _label_branches(self) -> None:
         """Each branch's first move, a little way along it — where branches
         leaving the same knot have already spread apart."""
+        if self.overview:
+            return
+        on_path = self._on_path()
         for b in self.tree.branches:
+            if not self.tree.visible(b) or b.is_first_move or b is self.tree.zoom:
+                continue                       # first moves: the pieces on the board; zoomed: in the base line
+            # only along your path and the choices leaving it — the moves that matter here
+            on = any(id(n) in on_path for n in b.nodes)
+            choice = b.parent is not None and any(id(n) in on_path for n in b.parent.nodes)
+            if not (on or choice):
+                continue
             x0, y0 = b.start_xy
             x, y = opening_tree.bezier(x0, y0, b.end.x, b.end.y, LABEL_AT if len(b.nodes) > 1 else 0.5)
             self.canvas.create_text(x + 8, y, text=move_label(b.nodes[0]), anchor="w", fill=theme.TEXT_MUTED,
@@ -281,7 +345,7 @@ class TreeView(ctk.CTkFrame):
 
     def _marker(self) -> None:
         node = self.selected
-        if node is None:
+        if node is None or node.move is None:     # the start: no single spot to mark
             return
         c = self.canvas
         c.create_oval(node.x - 10, node.y - 10, node.x + 10, node.y + 10, outline=GLOW, width=3.5,
@@ -298,7 +362,7 @@ class TreeView(ctk.CTkFrame):
     def _nodes(self) -> List[Node]:
         if self.tree is None:
             return []
-        return [self.tree.root] + [n for b in self.tree.branches for n in b.nodes]
+        return [n for b in self.tree.branches if self.tree.visible(b) for n in b.nodes]
 
     def nearest(self, x: float, y: float) -> Optional[Node]:
         best, best_d = None, SNAP_PX ** 2
@@ -321,6 +385,11 @@ class TreeView(ctk.CTkFrame):
             self._set_hover(None)
             self.canvas.configure(cursor="hand2")
             return
+        if over and over[0] in self._board_items:
+            node = self._board_items[over[0]]
+            self._set_hover(node if node.move is not None else None)
+            self.canvas.configure(cursor="hand2")
+            return
         self._set_hover(self._node_at(event))
 
     def _set_hover(self, node: Optional[Node]) -> None:
@@ -336,6 +405,9 @@ class TreeView(ctk.CTkFrame):
         r = 7
         c.coords(self._hover_ring, node.x - r, node.y - r, node.x + r, node.y + r)
         text = "Start" if node.move is None else move_label(node)
+        if node.line_ends:                     # a leaf: name its line(s)
+            text = short_name(node.line_ends[0][0], self.repertoire) + (
+                f" (+{len(node.line_ends) - 1})" if len(node.line_ends) > 1 else "")
         right = node.x < self.tree.width - 80
         tx = node.x + 13 if right else node.x - 13
         c.itemconfigure(self._hover_text, text=text, anchor="w" if right else "e", state="normal")
@@ -354,6 +426,9 @@ class TreeView(ctk.CTkFrame):
         if over and over[0] in self._dev_items and self.on_deviation is not None:
             self.on_deviation(*self._dev_items[over[0]])
             return
+        if over and over[0] in self._board_items:     # the mini board: a piece, or all trees
+            self.on_select(self._board_items[over[0]])
+            return
         node = self._node_at(event)
         if node is not None:
             self.on_select(node)
@@ -367,54 +442,187 @@ class TreeView(ctk.CTkFrame):
     def _paint_deviations(self) -> None:
         c = self.canvas
         self._dev_items = {}
-        if self.tree is None:
+        self.sidelines_hidden = False
+        if self.tree is None or self.overview:      # inside a tree only
             return
         by_id = {id(n): n for n in self._nodes()}
         for node_id, devs in self.deviations.items():
             node = by_id.get(node_id)
             if node is None:
                 continue
-            inside = self.start is None or opening_tree.is_inside(node, self.start)
+            if node.move is None:
+                continue                       # first moves: the board shows those
+            inside = self.inside(node)
             if not inside and not self.show_before:
                 continue
             line_color, text_color = (WILD, "#9AA1AD") if inside else (WILD_BEFORE, WILD_BEFORE_TEXT)
             if node is not self.selected:
                 # elsewhere just a thin ring: "Lichess players leave your lines here" —
                 # the twigs (with names, clickable) show for the selected position only
-                c.create_oval(node.x - 6, node.y - 6, node.x + 6, node.y + 6, outline=line_color, width=1.5)
+                ring = likely_colors(max(d.share for d in devs))[0] if inside else line_color
+                c.create_oval(node.x - 6, node.y - 6, node.x + 6, node.y + 6, outline=ring, width=1.5)
                 continue
-            for i, dev in enumerate(devs):
-                side = -1 if i % 2 == 0 else 1          # alternate left / right of the branch
-                step = i // 2
-                if node is self.start:                  # the start flag is on the right: fan left
-                    side, step = -1, i
-                if node.x < 70:
-                    side = 1
-                elif node.x > self.tree.width - 70:
-                    side = -1
-                ex, ey = node.x + side * (22 + 8 * step), node.y - 12 - 10 * step
-                c.create_line(node.x, node.y, ex, ey, fill=line_color, width=2, dash=(2, 3))
-                ring = c.create_oval(ex - 4, ey - 4, ex + 4, ey + 4, outline=line_color, width=2,
-                                     fill=theme.PANEL_BG)
-                text = f"{dev.san.split('.')[-1]} {dev.share:.0%}"
-                label = c.create_text(ex + side * 7, ey, text=text, anchor="w" if side > 0 else "e",
-                                      fill=text_color, font=(theme.FONT_FAMILY, 8))
-                for item in (ring, label):
-                    self._dev_items[item] = (node, dev.uci)
+            self._paint_sideline_list(node, devs, inside, line_color, text_color)
+
+    def _paint_sideline_list(self, node: Node, devs: list, inside: bool, line_color: str,
+                             text_color: str) -> None:
+        """The selected position's sidelines as a little list beside it, put
+        where neither the labels nor their connecting lines touch a branch or
+        another label: the first clear spot of a set of candidates (left /
+        right, below / above / level, nearer / further out). No clear spot
+        (a crowded, un-zoomed tree): not drawn at all — sidelines_hidden tells
+        the caller, which lists them in words instead."""
+        c = self.canvas
+        big = self.tree.zoom is not None          # zoomed in: larger, with a popularity bar
+        size, weight, row_h, r = (10, "bold", 22, 5) if big else (9, "normal", 17, 4)
+        font = tkfont.Font(family=theme.FONT_FAMILY, size=size, weight=weight)
+        texts = [f"{dev.san.split('.')[-1]} {dev.share:.0%}" for dev in devs]
+        width = r + 6 + max(font.measure(t) for t in texts)
+        height = row_h * len(devs)
+
+        def rows(side: int, dx: float, top: float):
+            """(ring x, ring y) for each row of this placement."""
+            return [(node.x + side * dx, top + row_h * i + row_h / 2) for i in range(len(devs))]
+
+        def crowding(side: int, dx: float, top: float) -> int:
+            x_ring = node.x + side * dx
+            x0 = min(x_ring - r - 2, x_ring + side * width)
+            x1 = max(x_ring + r + 2, x_ring + side * width)
+            if x0 < 2 or x1 > self.tree.width - 2 or top < 2 or top + height > self.tree.height - 2:
+                return 10 ** 6                    # off the canvas
+            hits = set(c.find_overlapping(x0, top, x1, top + height))
+            for rx, ry in rows(side, dx, top):    # the dotted connectors too (not right at the knot)
+                for t in (0.35, 0.6, 0.85):
+                    px, py = node.x + (rx - node.x) * t, node.y + (ry - node.y) * t
+                    hits |= set(c.find_overlapping(px - 2, py - 2, px + 2, py + 2))
+            return len(hits)
+
+        candidates = []
+        for dx in (36, 52, 72, 96):
+            for side in (-1, 1):
+                for top in (node.y + 8, node.y - 8 - height, node.y - height / 2):
+                    candidates.append((side, dx, top))
+        best = next((cand for cand in candidates if crowding(*cand) == 0), None)
+        if best is None:
+            self.sidelines_hidden = True       # never on top of a branch
+            return
+        side, dx, top = best
+        for (rx, ry), dev, text in zip(rows(side, dx, top), devs, texts):
+            # colour by likelihood (other openings, before yours starts, stay faint)
+            stroke, ink = likely_colors(dev.share) if inside else (line_color, text_color)
+            c.create_line(node.x, node.y, rx, ry, fill=stroke, width=2, dash=(2, 3))
+            ring = c.create_oval(rx - r, ry - r, rx + r, ry + r, outline=stroke, width=2, fill=theme.PANEL_BG)
+            label = c.create_text(rx + side * (r + 4), ry, text=text, anchor="w" if side > 0 else "e",
+                                  fill=ink, font=font)
+            items = [ring, label]
+            if big:                               # how popular, as a little bar under the name
+                x0, _, x1, y1 = c.bbox(label)
+                bar_w = max(4, (x1 - x0) * min(1.0, dev.share / 0.5))
+                bx = x0 if side > 0 else x1 - bar_w
+                items.append(c.create_rectangle(bx, y1 + 1, bx + bar_w, y1 + 3, fill=stroke, outline=""))
+            for item in items:
+                self._dev_items[item] = (node, dev.uci)
+        self._fonts = getattr(self, "_fonts", []) + [font]    # keep it alive while drawn
 
     def _paint_start_flag(self) -> None:
-        """A small amber flag where the opening starts (not at the very start)."""
-        node = self.start
-        if node is None or node.move is None:
+        """A small amber flag where each opening starts (not at the very start)."""
+        if self.overview:
             return
+        visible = {id(n) for n in self._nodes()}
+        at: Dict[int, List[str]] = {}
+        nodes: Dict[int, Node] = {}
+        for name, node in self.starts:
+            # (an opening that starts with its first move needs no flag: the piece shows it)
+            if node is not None and node.move is not None and node.parent.move is not None and id(node) in visible:
+                at.setdefault(id(node), []).append(name)
+                nodes[id(node)] = node
         c = self.canvas
-        right = node.x < self.tree.width - 120
-        fx = node.x + (10 if right else -10)
-        c.create_line(fx, node.y - 2, fx, node.y - 22, fill=GLOW, width=2)
-        c.create_polygon(fx, node.y - 22, fx + (12 if right else -12), node.y - 18, fx, node.y - 14,
-                         fill=GLOW, outline="")
-        c.create_text(fx + (16 if right else -16), node.y - 18, text=f"{self.repertoire} starts",
-                      anchor="w" if right else "e", fill=GLOW, font=(theme.FONT_FAMILY, 9, "bold"))
+        for node_id, names in at.items():
+            node = nodes[node_id]
+            right = node.x < self.tree.width - 120
+            fx = node.x + (10 if right else -10)
+            c.create_line(fx, node.y - 2, fx, node.y - 22, fill=GLOW, width=2)
+            c.create_polygon(fx, node.y - 22, fx + (12 if right else -12), node.y - 18, fx, node.y - 14,
+                             fill=GLOW, outline="")
+            c.create_text(fx + (16 if right else -16), node.y - 18, text=" / ".join(names) + " starts",
+                          anchor="w" if right else "e", fill=GLOW, font=(theme.FONT_FAMILY, 9, "bold"))
+
+    # ---------- the mini board along the bottom ----------
+
+    def _paint_zoom_base(self) -> None:
+        tree = self.tree
+        if tree.zoom is None:
+            return
+        start = tree.zoom.nodes[0].parent
+        c = self.canvas
+        c.create_line(start.x, start.y, start.x, tree.height, width=opening_tree.thickness(tree.zoom.lines),
+                      fill=BARK, capstyle="butt")
+        c.create_oval(start.x - 7, start.y - 7, start.x + 7, start.y + 7, fill=theme.PANEL_BG,
+                      outline=theme.TEXT, width=2.5)
+        where = "the start" if start.move is None else move_label(start)
+        # one line along the bottom edge (the branch's own move label isn't drawn when zoomed)
+        c.create_text(start.x + 12, tree.height - 8, text=f"zoomed in · after {where} · {move_label(tree.zoom.nodes[0])}",
+                      anchor="w", fill=theme.TEXT_MUTED, font=(theme.FONT_FAMILY, 9))
+        self._items[c.find_all()[-2]] = start            # click the knot to step back out
+
+    def _paint_board(self) -> None:
+        """Your pieces as they start; each first move's piece stands on its
+        square (a tree grows out of it). Click a piece to go into its tree,
+        anywhere else on the board for all of them."""
+        c, tree = self.canvas, self.tree
+        board = tree.board
+        self._board_items = {}
+        if board is None:
+            return
+        firsts = {}                            # destination square -> first-move node
+        moved_from = set()
+        for top in tree.root.children:
+            move = chess.Move.from_uci(top.move.move_uci)
+            firsts[move.to_square] = top
+            moved_from.add(move.from_square)
+        start = chess.Board()
+        sq_px = board.square
+        for rank in board.ranks:
+            for file in range(8):
+                sq = chess.square(file, rank)
+                x, y = board.center(sq)
+                light = (file + rank) % 2 == 1
+                fill = theme.BOARD_LIGHT if light else theme.BOARD_DARK
+                rect = c.create_rectangle(x - sq_px / 2, y - sq_px / 2, x + sq_px / 2, y + sq_px / 2,
+                                          fill=fill, outline="")
+                self._board_items[rect] = firsts.get(sq, tree.root)
+                piece = start.piece_at(sq) if sq not in moved_from else None
+                if sq in firsts:
+                    piece = start.piece_at(chess.Move.from_uci(firsts[sq].move.move_uci).from_square)
+                if piece is None:
+                    continue
+                glyph = self._glyph(x, y, piece)
+                for item in glyph:
+                    self._board_items[item] = firsts.get(sq, tree.root)
+        # first moves: amber ring (dimmed when another tree has the focus)
+        for sq, node in firsts.items():
+            x, y = board.center(sq)
+            active = tree.focus is None or tree.focus is node
+            ring = c.create_rectangle(x - sq_px / 2 + 1, y - sq_px / 2 + 1, x + sq_px / 2 - 1, y + sq_px / 2 - 1,
+                                      outline=GLOW if active else theme.BORDER_STRONG, width=2)
+            self._board_items[ring] = node
+            if not active:                     # another tree is showing: grey this piece out
+                veil = c.create_rectangle(x - sq_px / 2, y - sq_px / 2, x + sq_px / 2, y + sq_px / 2,
+                                          fill=theme.PANEL_BG, outline="", stipple="gray50")
+                self._board_items[veil] = node
+
+    def _glyph(self, x: float, y: float, piece: chess.Piece) -> List[int]:
+        c, size = self.canvas, max(10, int(self.tree.board.square * 0.68))
+        font = (theme.FONT_FAMILY, size)
+        symbol = GLYPHS[piece.piece_type]
+        if piece.color == chess.WHITE:
+            fill, outline = theme.PIECE_WHITE_FILL, theme.PIECE_WHITE_OUTLINE
+        else:
+            fill, outline = theme.PIECE_BLACK_FILL, theme.PIECE_BLACK_OUTLINE
+        items = [c.create_text(x + dx, y + dy, text=symbol, font=font, fill=outline)
+                 for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+        items.append(c.create_text(x, y, text=symbol, font=font, fill=fill))
+        return items
 
     # ---------- a new branch being played (not saved yet) ----------
 

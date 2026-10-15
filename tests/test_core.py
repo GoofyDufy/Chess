@@ -176,6 +176,42 @@ class OpeningTreeTests(unittest.TestCase):
         repertoire_gaps.mark_inside(gaps, {"white": [["d2d4", "d7d5", "c2c4"]]})
         self.assertEqual([g.inside for g in gaps], [False, True])
 
+    def test_all_repertoires_grow_from_their_first_moves_and_focus_hides_the_rest(self):
+        opening_importer.import_pgn_text('[Event "E"]\n\n1. c4 e5 2. Nc3 *\n', "English", PlayerColor.WHITE, self.conn)
+        tree = opening_tree.layout(opening_tree.build(self.conn, None, PlayerColor.WHITE), 400, 420)
+        firsts = {c.move.move_san: c for c in tree.root.children}
+        self.assertEqual(set(firsts), {"d4", "c4"})
+        # each first move sits on its own square of the mini board
+        self.assertEqual((firsts["d4"].x, firsts["d4"].y), tree.board.center(chess.D4))
+        self.assertEqual(tree.board.ranks, [0, 1, 2, 3])                 # ranks 1-4
+        self.assertFalse(tree.hidden)
+        opening_tree.layout(tree, 400, 420, focus=firsts["d4"])
+        self.assertTrue(tree.hidden)                                      # the 1.c4 tree is hidden
+        self.assertIs(tree.first_move_of(tree.node_for_path(["d2d4", "d7d5", "c2c4"])), firsts["d4"])
+
+    def test_deleting_a_branch_leaves_no_stub_and_keeps_other_lines(self):
+        # a separately imported line that branches off the Slav at move 3
+        opening_importer.import_pgn_text('[Event "QG - Slav 3.Nc3"]\n\n1. d4 d5 2. c4 c6 3. Nc3 *\n',
+                                         "QG", PlayerColor.WHITE, self.conn)
+        before = self.conn.execute("SELECT COUNT(*) FROM opening_lines").fetchone()[0]
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        node = tree.node_for_path(["d2d4", "d7d5", "c2c4", "c7c6", "b1c3"])
+        rows = [path[node.ply - 1].id for _, path in node.lines()]
+        removed = db.delete_branch(self.conn, rows)
+        # the whole separately imported game goes (its first four moves were only a stub now)
+        self.assertEqual(removed, 5)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM opening_lines").fetchone()[0], before - 5)
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        self.assertEqual(sorted(name for name, _, _ in tree.leaves), ["QG - Orthodox", "QG - Slav"])
+
+    def test_deleting_inside_a_line_shortens_it(self):
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        node = tree.node_for_path(["d2d4", "d7d5", "c2c4", "e7e6", "b1c3"])     # 3.Nc3 in the Orthodox
+        db.delete_branch(self.conn, [path[node.ply - 1].id for _, path in node.lines()])
+        tree = opening_tree.build(self.conn, "QG", PlayerColor.WHITE)
+        self.assertIsNone(tree.node_for_path(["d2d4", "d7d5", "c2c4", "e7e6", "b1c3"]))
+        self.assertIsNotNone(tree.node_for_path(["d2d4", "d7d5", "c2c4", "c7c6", "g1f3", "g8f6"]))  # Slav intact
+
     def test_many_lines_make_the_tree_wider_than_the_view(self):
         pgn = "".join(f'[Event "L{i}"]\n\n1. e4 {m} *\n\n' for i, m in
                       enumerate(["e5", "c5", "e6", "c6", "d5", "d6", "Nf6", "g6", "b6", "a6", "Nc6", "b5"]))
@@ -350,9 +386,25 @@ class LichessExplorerTests(unittest.TestCase):
             s = OpeningDrillSession(self.conn, "Black", PlayerColor.BLACK, move_share=share)
             s.start()
             counts[s.target_path[0].move_san] += 1
-        # separate lines: 1.e4 line ~ .7*.8 = .56, 1.d4 line ~ .25*.9 = .225  (≈ 71% vs 29%)
+        # only White's first move is a split in these lines: 1.e4 vs 1.d4 among the replies
+        # covered = .7 / (.7 + .25) ≈ 74% vs 26% (later moves don't split, so they don't count)
         self.assertGreater(counts["e4"], 2 * counts["d4"])
-        self.assertGreater(counts["d4"], 60)
+        self.assertGreater(counts["d4"], 90)
+
+    def test_long_lines_are_not_penalised_for_their_length(self):
+        # two Black lines splitting on White's first move, equally popular; one is much longer
+        conn = fresh_conn()
+        pgn = ('[Event "Short"]\n\n1. e4 c5 *\n\n'
+               '[Event "Long"]\n\n1. d4 Nf6 2. c4 e6 3. Nf3 b6 4. g3 Bb7 5. Bg2 Be7 *\n')
+        opening_importer.import_pgn_text(pgn, "Mix", PlayerColor.BLACK, conn)
+        import random
+        random.seed(3)
+        counts = {"e4": 0, "d4": 0}
+        for _ in range(400):
+            s = OpeningDrillSession(conn, "Mix", PlayerColor.BLACK, move_share=lambda fen, uci: 0.3)
+            s.start()
+            counts[s.target_path[0].move_san] += 1
+        self.assertGreater(min(counts.values()), 150)          # about 50/50, not 99/1
 
     def test_no_data_falls_back_to_uniform(self):
         s = OpeningDrillSession(self.conn, "Black", PlayerColor.BLACK, move_share=lambda fen, uci: None)

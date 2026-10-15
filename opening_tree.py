@@ -23,7 +23,7 @@ import chess
 import db
 from models import OpeningLine, PlayerColor
 
-LEAF_SPACING = 40        # minimum px between neighbouring leaves
+LEAF_SPACING = 26        # minimum px between neighbouring leaves (names slant, so they can sit close)
 MARGIN_X = 28
 MARGIN_RIGHT = 96        # leaf names slant up to the right: room for the last one
 TOP = 112                # leaves' row (their names go above, slanted)
@@ -87,9 +87,43 @@ class Branch:
         return len(self.end.lines())
 
     @property
+    def is_first_move(self) -> bool:
+        """Starts with the game's first move: grows out of its square on the mini board."""
+        return self.parent is None
+
+    @property
     def start_xy(self) -> Tuple[float, float]:
         first = self.nodes[0]
-        return (first.parent.x, first.parent.y) if first.parent else (first.x, first.y)
+        if self.is_first_move:                 # the first move's own square
+            return first.x, first.y
+        return first.parent.x, first.parent.y
+
+    def t_at(self, i: int) -> float:
+        """Where its i-th position sits along its curve (0 = start, 1 = end)."""
+        if self.is_first_move:
+            return i / (len(self.nodes) - 1) if len(self.nodes) > 1 else 1.0
+        return (i + 1) / len(self.nodes)
+
+
+@dataclass
+class MiniBoard:
+    """The near half of a chess set under the tree: your pieces, with each
+    first move's piece on its square and a tree growing out of it."""
+    x0: float
+    bottom: float
+    square: float
+    ranks: List[int]          # displayed ranks (0-7), from the bottom row up
+    flipped: bool             # Black at the bottom
+
+    def center(self, sq: int) -> Tuple[float, float]:
+        file, rank = chess.square_file(sq), chess.square_rank(sq)
+        col = 7 - file if self.flipped else file
+        row = self.ranks.index(rank)
+        return self.x0 + (col + 0.5) * self.square, self.bottom - (row + 0.5) * self.square
+
+    @property
+    def top(self) -> float:
+        return self.bottom - len(self.ranks) * self.square
 
 
 @dataclass
@@ -97,8 +131,21 @@ class Tree:
     root: Node
     branches: List[Branch]
     leaves: List[Tuple[str, List[OpeningLine], Node]]    # every line: (name, path, end position)
+    my_color: PlayerColor = PlayerColor.WHITE
     width: float = 0.0
     height: float = 0.0
+    board: Optional[MiniBoard] = None
+    focus: Optional[Node] = None          # a first move: only its tree is laid out (the rest hidden)
+    zoom: Optional["Branch"] = None       # zoomed in: only this branch and what grows from it
+    hidden: set = field(default_factory=set)    # id(branch) not shown
+
+    def visible(self, branch: "Branch") -> bool:
+        return id(branch) not in self.hidden
+
+    def first_move_of(self, node: Node) -> Optional[Node]:
+        while node is not None and node.parent is not None and node.parent.move is not None:
+            node = node.parent
+        return node if node is not None and node.move is not None else None
 
     def node_for_path(self, ucis: List[str]) -> Optional[Node]:
         node = self.root
@@ -109,11 +156,17 @@ class Tree:
         return node
 
 
-def build(conn: sqlite3.Connection, repertoire_name: str, my_color: PlayerColor) -> Tree:
-    rows = conn.execute(
-        "SELECT * FROM opening_lines WHERE repertoire_name = ? AND my_color = ? AND is_enabled = 1",
-        (repertoire_name, my_color.value),
-    ).fetchall()
+def build(conn: sqlite3.Connection, repertoire_name: Optional[str], my_color: PlayerColor) -> Tree:
+    """One repertoire's tree, or (repertoire_name None) every repertoire of
+    that colour merged into one forest — a tree per first move."""
+    if repertoire_name is None:
+        rows = conn.execute("SELECT * FROM opening_lines WHERE my_color = ? AND is_enabled = 1",
+                            (my_color.value,)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM opening_lines WHERE repertoire_name = ? AND my_color = ? AND is_enabled = 1",
+            (repertoire_name, my_color.value),
+        ).fetchall()
     nodes = [db._row_to_opening_line(r) for r in rows]
     children: Dict[Optional[str], List[OpeningLine]] = {}
     for n in nodes:
@@ -133,7 +186,7 @@ def build(conn: sqlite3.Connection, repertoire_name: str, my_color: PlayerColor)
                     nxt = Node(step, parent=pos)
                     pos.children.append(nxt)
                 pos = nxt
-            name = line_root.line_name or repertoire_name
+            name = line_root.line_name or line_root.repertoire_name
             pos.line_ends.append((name, path))
             leaves.append((name, path, pos))
         for kid in kids:
@@ -156,57 +209,139 @@ def build(conn: sqlite3.Connection, repertoire_name: str, my_color: PlayerColor)
 
     for child in root.children:
         make_branch(child, None, 1)
-    return Tree(root, branches, leaves)
+    return Tree(root, branches, leaves, my_color=my_color)
 
 
-def layout(tree: Tree, width: float, height: float) -> Tree:
-    """Leaves spread along the top row (in tree order), each knot centred over
-    the leaves it leads to, knots stepping up from the root by depth."""
-    slots: List[Branch] = []          # one slot per leaf, left to right
+MINI_SQUARE = 26          # px per square of the mini board (smaller if the view is narrow)
+KNOT_GAP = 22             # first knots sit this far above the board
 
-    def order(branch: Branch) -> None:
-        if branch.end.line_ends:      # a line ends here (maybe others carry on)
-            branch.leaf_index = len(slots)
-            slots.append(branch)
+
+ZOOM_BASE = 30            # zoomed in: the branch starts this far above the bottom
+
+
+def layout(tree: Tree, width: float, height: float, focus: Optional[Node] = None,
+           zoom: Optional["Branch"] = None) -> Tree:
+    """The mini board along the bottom; each first move's tree grows from its
+    piece, its strip of width in proportion to its lines. focus (a first move):
+    only that tree, across the whole width. zoom (a branch further in): only
+    it and what grows from it, starting at the bottom, no board. Leaves spread
+    along the top row, each knot centred over the leaves it leads to, knots
+    stepping up by depth."""
+    tops = [b for b in tree.branches if b.parent is None]
+    tree.zoom = zoom if zoom is not None and zoom.parent is not None else None
+    if tree.zoom is not None:
+        tops = [tree.zoom]
+        node = tree.zoom.nodes[0]
+        while node.parent is not None and node.parent.move is not None:
+            node = node.parent
+        tree.focus = node
+    elif focus is not None and any(b.nodes[0] is focus for b in tops):
+        tops = [b for b in tops if b.nodes[0] is focus]
+        tree.focus = focus
+    else:
+        tree.focus = None
+    shown = set()
+
+    def mark(branch: Branch) -> None:
+        shown.add(id(branch))
         for child in branch.children:
-            order(child)
+            mark(child)
 
-    top_branches = [b for b in tree.branches if b.parent is None]
-    for b in top_branches:
-        order(b)
-    n = max(1, len(slots))
+    for b in tops:
+        mark(b)
+    tree.hidden = {id(b) for b in tree.branches if id(b) not in shown}
+
+    groups: List[List[Branch]] = []        # leaf slots per first-move tree, left to right
+    tops.sort(key=lambda b: _square_order(tree, b))
+    for top in tops:
+        slots: List[Branch] = []
+
+        def order(branch: Branch) -> None:
+            if branch.end.line_ends:      # a line ends here (maybe others carry on)
+                slots.append(branch)
+            for child in branch.children:
+                order(child)
+
+        order(top)
+        groups.append(slots)
+    n = max(1, sum(len(g) for g in groups))
     tree.width = max(width, MARGIN_X + MARGIN_RIGHT + (n - 1) * LEAF_SPACING)
     tree.height = height
     span = tree.width - MARGIN_X - MARGIN_RIGHT
-    xs = {id(b): MARGIN_X + (span * i / (n - 1) if n > 1 else span / 2) for i, b in enumerate(slots)}
 
-    max_depth = max((b.depth for b in tree.branches), default=1)
-    root_y = height - BOTTOM_PAD
-    knot_band = (root_y - TOP) * 0.78          # knots live in the lower part; leaves on top
-    step = knot_band / max(1, max_depth)
+    # leaves evenly spaced overall, so each tree's strip is in proportion to its lines
+    xs: Dict[int, float] = {}
+    i = 0
+    for slots in groups:
+        for b in slots:
+            xs[id(b)] = MARGIN_X + (span * i / (n - 1) if n > 1 else span / 2)
+            b.color_index = i
+            i += 1
+
+    # the mini board: your back ranks up to the furthest first move
+    flipped = tree.my_color == PlayerColor.BLACK
+    dest_ranks = [chess.square_rank(chess.Move.from_uci(b.nodes[0].move.move_uci).to_square)
+                  for b in tree.branches if b.parent is None] or [3]
+    if flipped:
+        ranks = list(range(7, min(dest_ranks) - 1, -1))
+    else:
+        ranks = list(range(0, max(dest_ranks) + 1))
+    sq = min(MINI_SQUARE, (width - 2 * MARGIN_X) / 8)
+    tree.board = MiniBoard((tree.width - 8 * sq) / 2, height - 6, sq, ranks, flipped)
+    base_y = tree.board.top - KNOT_GAP
+    depth0 = 0                                # depth counted from here
+    if tree.zoom is not None:
+        tree.board = None                     # zoomed in: the branch itself is the base
+        base_y = height - ZOOM_BASE - KNOT_GAP
+        depth0 = tree.zoom.depth - 1
+
+    visible = [b for b in tree.branches if id(b) in shown]
+    max_depth = max((b.depth - depth0 for b in visible), default=1)
+    step = (base_y - TOP) * 0.82 / max(1, max_depth)
 
     def place(branch: Branch) -> float:
         child_x = [place(c) for c in branch.children]
         own = [xs[id(branch)]] if id(branch) in xs else []
         x = sum(child_x + own) / len(child_x + own)
-        branch.end.x = x
-        branch.end.y = TOP if not branch.children else root_y - branch.depth * step
+        if tree.board is not None and branch.is_first_move and len(branch.nodes) == 1 and branch.children:
+            # lines part right after the first move: the knot IS the piece on the board
+            branch.end.x, branch.end.y = _first_xy(tree, branch)
+        else:
+            branch.end.x = x
+            branch.end.y = TOP if not branch.children else base_y - (branch.depth - depth0 - 1) * step - step * 0.5
         return x
 
-    for b in top_branches:
+    for b in tops:
         place(b)
-    tree.root.x = sum(b.end.x for b in top_branches) / max(1, len(top_branches)) if top_branches else tree.width / 2
-    tree.root.y = root_y
+        if tree.board is not None:
+            b.nodes[0].x, b.nodes[0].y = _first_xy(tree, b)
+    if tree.zoom is not None:
+        # the zoomed branch grows from the bottom centre (from its knot below, hidden)
+        start = tree.zoom.nodes[0].parent
+        start.x, start.y = tree.width / 2, height - ZOOM_BASE
+        tree.root.x, tree.root.y = start.x, start.y
+    else:
+        tree.root.x, tree.root.y = tree.width / 2, (tree.board.top + tree.board.bottom) / 2
 
     # positions along each branch, on its curve (the knot is the last one)
-    for b in tree.branches:
+    for b in visible:
         (x0, y0), (x1, y1) = b.start_xy, (b.end.x, b.end.y)
-        for i, node in enumerate(b.nodes[:-1], start=1):
-            node.x, node.y = bezier(x0, y0, x1, y1, i / len(b.nodes))
-    # colours: one per leaf, families kept apart by the top-level branch
-    for i, b in enumerate(slots):
-        b.color_index = i
+        for i, node in enumerate(b.nodes[:-1]):
+            if b.is_first_move and i == 0:
+                continue                   # on its square
+            node.x, node.y = bezier(x0, y0, x1, y1, b.t_at(i))
     return tree
+
+
+def _first_xy(tree: Tree, top: Branch) -> Tuple[float, float]:
+    move = chess.Move.from_uci(top.nodes[0].move.move_uci)
+    return tree.board.center(move.to_square)
+
+
+def _square_order(tree: Tree, top: Branch) -> float:
+    """Trees left to right in the order their squares sit on the board."""
+    file = chess.square_file(chess.Move.from_uci(top.nodes[0].move.move_uci).to_square)
+    return 7 - file if tree.my_color == PlayerColor.BLACK else file
 
 
 def curve(x0: float, y0: float, x1: float, y1: float) -> List[float]:

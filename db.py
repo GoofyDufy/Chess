@@ -638,6 +638,11 @@ def lines_at_fen(conn: sqlite3.Connection, repertoire_name: str, my_color: str, 
     unrelated rows in the database, but this matches them by FEN instead
     of by shared ancestry, so they're correctly treated as alternatives at
     that position."""
+    if parse_group(repertoire_name) is not None:
+        rows = conn.execute(
+            "SELECT * FROM opening_lines WHERE my_color = ? AND fen_before_move = ? AND is_enabled = 1",
+            (my_color, fen)).fetchall()
+        return [_row_to_opening_line(r) for r in rows]
     rows = conn.execute(
         """SELECT * FROM opening_lines
            WHERE repertoire_name = ? AND my_color = ? AND fen_before_move = ?
@@ -647,9 +652,42 @@ def lines_at_fen(conn: sqlite3.Connection, repertoire_name: str, my_color: str, 
     return [_row_to_opening_line(r) for r in rows]
 
 
+# Drilling several repertoires at once: a repertoire name of "*" means every
+# repertoire of that colour, "*:d2d4" those whose lines start with that first
+# move (1.d4 for White; for Black, White's first move, e.g. "*:e2e4").
+ALL_REPERTOIRES = "*"
+
+
+def group_name(first_uci: Optional[str] = None) -> str:
+    return ALL_REPERTOIRES + (f":{first_uci}" if first_uci else "")
+
+
+def parse_group(repertoire_name: str) -> Optional[Optional[str]]:
+    """None: an ordinary repertoire. Else the group's first-move filter (None = all)."""
+    if not repertoire_name.startswith(ALL_REPERTOIRES):
+        return None
+    _, _, first = repertoire_name.partition(":")
+    return first or ""
+
+
+def first_moves(conn: sqlite3.Connection, my_color: str) -> List[Tuple[str, str, int]]:
+    """(uci, san, lines) of every first move your repertoires of this colour start with."""
+    rows = conn.execute(
+        """SELECT move_uci, move_san, COUNT(*) AS n FROM opening_lines
+           WHERE my_color = ? AND parent_id IS NULL AND is_enabled = 1
+           GROUP BY move_uci ORDER BY n DESC""", (my_color,)).fetchall()
+    return [(r["move_uci"], r["move_san"], r["n"]) for r in rows]
+
+
 def root_lines(conn: sqlite3.Connection, repertoire_name: str, my_color: str) -> List[OpeningLine]:
     """Ply-1 nodes (parent_id IS NULL) for a given repertoire — enabled
     ones only, since this is what drilling draws from."""
+    group = parse_group(repertoire_name)
+    if group is not None:                  # every repertoire of the colour (maybe one first move)
+        rows = conn.execute(
+            """SELECT * FROM opening_lines WHERE my_color = ? AND parent_id IS NULL AND is_enabled = 1
+               AND (? = '' OR move_uci = ?)""", (my_color, group, group)).fetchall()
+        return [_row_to_opening_line(r) for r in rows]
     rows = conn.execute(
         """SELECT * FROM opening_lines
            WHERE repertoire_name = ? AND my_color = ? AND parent_id IS NULL
@@ -686,6 +724,36 @@ def _all_children_of(conn: sqlite3.Connection, parent_id: str) -> List[OpeningLi
         "SELECT * FROM opening_lines WHERE parent_id = ?", (parent_id,)
     ).fetchall()
     return [_row_to_opening_line(r) for r in rows]
+
+
+def delete_branch(conn: sqlite3.Connection, node_ids: List[str]) -> int:
+    """Deletes these opening-line moves and everything after them. Then, so a
+    separately imported line doesn't leave a stub of moves that lead nowhere,
+    removes each emptied parent that wasn't the end of a line itself, upward.
+    Returns how many moves were removed."""
+    removed = 0
+    with conn:
+        for node_id in node_ids:
+            row = conn.execute("SELECT parent_id FROM opening_lines WHERE id = ?", (node_id,)).fetchone()
+            if row is None:
+                continue                      # already gone (under another one deleted here)
+            parent = row["parent_id"]
+            stack = [node_id]
+            while stack:
+                current = stack.pop()
+                stack.extend(r["id"] for r in conn.execute(
+                    "SELECT id FROM opening_lines WHERE parent_id = ?", (current,)))
+                removed += conn.execute("DELETE FROM opening_lines WHERE id = ?", (current,)).rowcount
+            while parent is not None:
+                p = conn.execute("SELECT parent_id, is_line_end FROM opening_lines WHERE id = ?",
+                                 (parent,)).fetchone()
+                has_children = conn.execute("SELECT 1 FROM opening_lines WHERE parent_id = ?",
+                                            (parent,)).fetchone()
+                if p is None or has_children or p["is_line_end"]:
+                    break
+                removed += conn.execute("DELETE FROM opening_lines WHERE id = ?", (parent,)).rowcount
+                parent = p["parent_id"]
+    return removed
 
 
 def set_line_enabled(conn: sqlite3.Connection, root_id: str, enabled: bool) -> None:
